@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import logging
 import requests
 from datetime import datetime
@@ -15,8 +16,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+ASANA_TOKEN = os.getenv("ASANA_TOKEN")
 
-# YOUR TELEGRAM USER ID
 ALLOWED_USER_ID = 8106199737
 
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +51,7 @@ Rules:
 - Respond naturally like a premium AI assistant.
 """
 
-headers = {
+supabase_headers = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type": "application/json",
@@ -72,7 +73,7 @@ def save_to_supabase(user_message, assistant_response):
         "source": "telegram"
     }
 
-    result = requests.post(url, headers=headers, json=data)
+    result = requests.post(url, headers=supabase_headers, json=data)
 
     if result.status_code not in [200, 201, 204]:
         print("Event save failed:", result.status_code, result.text)
@@ -89,7 +90,7 @@ def save_expense(amount, category, description):
         "source": "telegram"
     }
 
-    result = requests.post(url, headers=headers, json=data)
+    result = requests.post(url, headers=supabase_headers, json=data)
 
     if result.status_code not in [200, 201, 204]:
         print("Expense save failed:", result.status_code, result.text)
@@ -139,7 +140,7 @@ def detect_expense(user_message):
 def get_recent_memories():
     url = f"{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=5"
 
-    result = requests.get(url, headers=headers)
+    result = requests.get(url, headers=supabase_headers)
 
     if result.status_code == 200:
         return result.json()
@@ -148,9 +149,29 @@ def get_recent_memories():
     return []
 
 
+def test_asana_connection():
+    if not ASANA_TOKEN:
+        print("ASANA TEST: ASANA_TOKEN missing")
+        return
+
+    asana_headers = {
+        "Authorization": f"Bearer {ASANA_TOKEN}"
+    }
+
+    url = "https://app.asana.com/api/1.0/users/me"
+
+    response = requests.get(url, headers=asana_headers)
+
+    print("ASANA STATUS:", response.status_code)
+
+    try:
+        print("ASANA RESPONSE:", json.dumps(response.json(), indent=2))
+    except Exception:
+        print("ASANA RAW RESPONSE:", response.text)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    # SECURITY CHECK
     if update.effective_user.id != ALLOWED_USER_ID:
         print(f"Blocked unauthorized user: {update.effective_user.id}")
         return
@@ -158,6 +179,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
 
     await update.message.chat.send_action("typing")
+
+    # Temporary Asana API test
+    if "test asana" in user_message.lower():
+        test_asana_connection()
+        await update.message.reply_text("Asana test executed. Check Render logs.")
+        return
 
     current_datetime = get_current_datetime()
 
