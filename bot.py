@@ -2,6 +2,8 @@ import os
 import re
 import logging
 import requests
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -26,12 +28,15 @@ You help manage:
 - priorities
 - tasks
 - planning
+- daily decisions
 
 Rules:
-- Always prioritize user's personal data.
+- Always prioritize the user's personal data.
 - Be direct and concise.
 - Mention overspending if relevant.
 - Use previous memory when possible.
+- If live date/time is provided, use it.
+- Do not say you lack date/time data if runtime context provides it.
 - End with one short motivational line.
 """
 
@@ -43,6 +48,11 @@ headers = {
 }
 
 
+def get_current_datetime():
+    now = datetime.now(ZoneInfo("Europe/Berlin"))
+    return now.strftime("%A, %d %B %Y, %H:%M")
+
+
 def save_to_supabase(user_message, assistant_response):
     url = f"{SUPABASE_URL}/rest/v1/events_log"
 
@@ -52,7 +62,10 @@ def save_to_supabase(user_message, assistant_response):
         "source": "telegram"
     }
 
-    requests.post(url, headers=headers, json=data)
+    result = requests.post(url, headers=headers, json=data)
+
+    if result.status_code not in [200, 201, 204]:
+        print("Event save failed:", result.status_code, result.text)
 
 
 def save_expense(amount, category, description):
@@ -68,16 +81,21 @@ def save_expense(amount, category, description):
 
     result = requests.post(url, headers=headers, json=data)
 
-    print("Expense save status:", result.status_code)
+    if result.status_code not in [200, 201, 204]:
+        print("Expense save failed:", result.status_code, result.text)
+    else:
+        print("Expense save status:", result.status_code)
 
 
 def detect_expense(user_message):
     text = user_message.lower()
 
-    if "spent" not in text:
+    expense_keywords = ["spent", "paid", "bought", "cost me", "expense"]
+
+    if not any(keyword in text for keyword in expense_keywords):
         return None
 
-    amount_match = re.search(r'(\d+)', text)
+    amount_match = re.search(r'(\d+(\.\d+)?)', text)
 
     if not amount_match:
         return None
@@ -87,16 +105,19 @@ def detect_expense(user_message):
     category = "general"
 
     categories = {
-        "food": ["food", "restaurant", "burger", "pizza", "coffee"],
-        "transport": ["uber", "taxi", "train", "fuel"],
-        "shopping": ["shopping", "amazon", "clothes"],
-        "bills": ["rent", "electricity", "internet"]
+        "food": ["food", "restaurant", "burger", "pizza", "coffee", "lunch", "dinner", "breakfast", "groceries"],
+        "transport": ["uber", "taxi", "train", "bus", "fuel", "petrol", "diesel", "tram"],
+        "shopping": ["shopping", "amazon", "clothes", "shirt", "shoes", "mall"],
+        "bills": ["rent", "electricity", "internet", "phone", "gas", "insurance"],
+        "health": ["medicine", "doctor", "pharmacy", "hospital"],
+        "entertainment": ["movie", "cinema", "netflix", "game", "party"]
     }
 
     for cat, keywords in categories.items():
         for keyword in keywords:
             if keyword in text:
                 category = cat
+                break
 
     return {
         "amount": amount,
@@ -108,11 +129,12 @@ def detect_expense(user_message):
 def get_recent_memories():
     url = f"{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=5"
 
-    response = requests.get(url, headers=headers)
+    result = requests.get(url, headers=headers)
 
-    if response.status_code == 200:
-        return response.json()
+    if result.status_code == 200:
+        return result.json()
 
+    print("Memory fetch failed:", result.status_code, result.text)
     return []
 
 
@@ -120,6 +142,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
 
     await update.message.chat.send_action("typing")
+
+    current_datetime = get_current_datetime()
+
+    runtime_context = f"""
+
+Runtime context:
+- Current date and time: {current_datetime}
+- Timezone: Europe/Berlin
+- User location context: Germany
+"""
 
     expense = detect_expense(user_message)
 
@@ -153,7 +185,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1000,
-        system=SYSTEM_PROMPT,
+        system=SYSTEM_PROMPT + runtime_context,
         messages=conversation_history
     )
 
