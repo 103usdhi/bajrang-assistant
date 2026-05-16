@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import requests
 from dotenv import load_dotenv
@@ -19,26 +20,31 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 SYSTEM_PROMPT = """You are Bajrang, a personal life assistant.
 
-You have access to the user's personal data including finances, goals, achievements and tasks.
+You help manage:
+- finances
+- goals
+- priorities
+- tasks
+- planning
 
 Rules:
-- Always be direct. No fluff.
-- Answer in bullet points unless asked otherwise.
-- Always mention if the user is overspending.
-- If you do not have data to answer, say so clearly.
-- Use saved memory from past conversations when available.
-- End every response with one short motivational line.
+- Always prioritize user's personal data.
+- Be direct and concise.
+- Mention overspending if relevant.
+- Use previous memory when possible.
+- End with one short motivational line.
 """
+
+headers = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=minimal"
+}
+
 
 def save_to_supabase(user_message, assistant_response):
     url = f"{SUPABASE_URL}/rest/v1/events_log"
-
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=minimal"
-    }
 
     data = {
         "user_message": user_message,
@@ -46,33 +52,83 @@ def save_to_supabase(user_message, assistant_response):
         "source": "telegram"
     }
 
+    requests.post(url, headers=headers, json=data)
+
+
+def save_expense(amount, category, description):
+    url = f"{SUPABASE_URL}/rest/v1/expenses"
+
+    data = {
+        "amount": amount,
+        "category": category,
+        "description": description,
+        "currency": "EUR",
+        "source": "telegram"
+    }
+
     result = requests.post(url, headers=headers, json=data)
 
-    if result.status_code not in [200, 201, 204]:
-        print("Supabase save failed:", result.status_code, result.text)
+    print("Expense save status:", result.status_code)
+
+
+def detect_expense(user_message):
+    text = user_message.lower()
+
+    if "spent" not in text:
+        return None
+
+    amount_match = re.search(r'(\d+)', text)
+
+    if not amount_match:
+        return None
+
+    amount = float(amount_match.group(1))
+
+    category = "general"
+
+    categories = {
+        "food": ["food", "restaurant", "burger", "pizza", "coffee"],
+        "transport": ["uber", "taxi", "train", "fuel"],
+        "shopping": ["shopping", "amazon", "clothes"],
+        "bills": ["rent", "electricity", "internet"]
+    }
+
+    for cat, keywords in categories.items():
+        for keyword in keywords:
+            if keyword in text:
+                category = cat
+
+    return {
+        "amount": amount,
+        "category": category,
+        "description": user_message
+    }
 
 
 def get_recent_memories():
     url = f"{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=5"
 
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}"
-    }
+    response = requests.get(url, headers=headers)
 
-    result = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        return response.json()
 
-    if result.status_code == 200:
-        return result.json()
-    else:
-        print("Supabase memory fetch failed:", result.status_code, result.text)
-        return []
+    return []
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
 
     await update.message.chat.send_action("typing")
+
+    expense = detect_expense(user_message)
+
+    if expense:
+        save_expense(
+            expense["amount"],
+            expense["category"],
+            expense["description"]
+        )
 
     recent_memories = get_recent_memories()
 
@@ -113,9 +169,11 @@ def main():
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )
 
-    print("Bajrang is running! Open Telegram and say hello.")
+    print("Bajrang is running!")
 
     app.run_polling()
 
