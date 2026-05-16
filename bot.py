@@ -16,6 +16,9 @@ ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
+# YOUR TELEGRAM USER ID
+ALLOWED_USER_ID = 8106199737
+
 logging.basicConfig(level=logging.INFO)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -35,9 +38,8 @@ Rules:
 - Be direct and concise.
 - Mention overspending if relevant.
 - Use previous memory when possible.
-- If live date/time is provided, use it.
-- Do not say you lack date/time data if runtime context provides it.
-- End with one short motivational line.
+- Use runtime date/time context if available.
+- End every response with one short motivational line.
 """
 
 headers = {
@@ -90,7 +92,7 @@ def save_expense(amount, category, description):
 def detect_expense(user_message):
     text = user_message.lower()
 
-    expense_keywords = ["spent", "paid", "bought", "cost me", "expense"]
+    expense_keywords = ["spent", "paid", "bought", "expense"]
 
     if not any(keyword in text for keyword in expense_keywords):
         return None
@@ -105,12 +107,12 @@ def detect_expense(user_message):
     category = "general"
 
     categories = {
-        "food": ["food", "restaurant", "burger", "pizza", "coffee", "lunch", "dinner", "breakfast", "groceries"],
-        "transport": ["uber", "taxi", "train", "bus", "fuel", "petrol", "diesel", "tram"],
-        "shopping": ["shopping", "amazon", "clothes", "shirt", "shoes", "mall"],
-        "bills": ["rent", "electricity", "internet", "phone", "gas", "insurance"],
-        "health": ["medicine", "doctor", "pharmacy", "hospital"],
-        "entertainment": ["movie", "cinema", "netflix", "game", "party"]
+        "food": ["food", "pizza", "burger", "coffee", "restaurant", "groceries"],
+        "transport": ["uber", "taxi", "fuel", "train", "bus"],
+        "shopping": ["shopping", "amazon", "clothes", "shoes"],
+        "bills": ["rent", "internet", "electricity", "insurance"],
+        "health": ["doctor", "medicine", "hospital", "pharmacy"],
+        "entertainment": ["movie", "netflix", "party", "cinema"]
     }
 
     for cat, keywords in categories.items():
@@ -139,6 +141,12 @@ def get_recent_memories():
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    # SECURITY CHECK
+    if update.effective_user.id != ALLOWED_USER_ID:
+        print(f"Blocked unauthorized user: {update.effective_user.id}")
+        return
+
     user_message = update.message.text
 
     await update.message.chat.send_action("typing")
