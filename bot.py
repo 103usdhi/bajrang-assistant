@@ -349,16 +349,17 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
 
- scheduler = BackgroundScheduler(timezone="Europe/Berlin")
+    scheduler = BackgroundScheduler(timezone="Europe/Berlin")
 
-scheduler.add_job(
-    lambda: app.create_task(send_daily_briefing(app)),
-    "cron",
-    hour=8,
-    minute=0
-)
+    scheduler.add_job(
+        lambda: app.create_task(send_daily_briefing(app)),
+        "cron",
+        hour=8,
+        minute=0
+    )
 
-scheduler.start()
+    scheduler.start()
+
     print("Bajrang is running!")
 
     app.run_polling()
