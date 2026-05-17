@@ -1,36 +1,88 @@
-import os import re import json import logging import requests from datetime import datetime, timedelta from zoneinfo import ZoneInfo
-from dotenv import load_dotenv from openai import OpenAI from telegram import Update from telegram.ext import Application, MessageHandler, filters, ContextTypes from apscheduler.schedulers.background import BackgroundScheduler
+import os
+import re
+import json
+import logging
+import requests
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+from openai import OpenAI
+from telegram import Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from apscheduler.schedulers.background import BackgroundScheduler
+
 import anthropic
-from google.oauth2.credentials import Credentials from googleapiclient.discovery import build
+
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+
 load_dotenv()
-TELEGRAM_TOKEN = os.getenv(“TELEGRAM_TOKEN”) ANTHROPIC_KEY = os.getenv(“ANTHROPIC_KEY”) SUPABASE_URL = os.getenv(“SUPABASE_URL”) SUPABASE_KEY = os.getenv(“SUPABASE_KEY”) ASANA_TOKEN = os.getenv(“ASANA_TOKEN”) GOOGLE_TOKEN_JSON = os.getenv(“GOOGLE_TOKEN_JSON”) OPENAI_API_KEY = os.getenv(“OPENAI_API_KEY”)
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+ASANA_TOKEN = os.getenv("ASANA_TOKEN")
+GOOGLE_TOKEN_JSON = os.getenv("GOOGLE_TOKEN_JSON")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 ALLOWED_USER_ID = 8106199737
+
 logging.basicConfig(level=logging.INFO)
-client = anthropic.Anthropic(api_key=ANTHROPIC_KEY) openai_client = OpenAI(api_key=OPENAI_API_KEY)
-SYSTEM_PROMPT = ““” You are Bajrang, a personal AI assistant.
+
+client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+SYSTEM_PROMPT = """
+You are Bajrang, a personal AI assistant.
+
 You can use:
-•	personal memory
-•	semantic memory
-•	finance database
-•	Gmail
-•	Google Calendar
-•	Asana
+
+* personal memory
+* semantic memory
+* finance database
+* Gmail
+* Google Calendar
+* Asana
+
 Rules:
-•	Maintain conversation flow.
-•	Use explicit saved memories when relevant.
-•	Understand follow-up messages.
-•	Prioritize user’s personal data.
-•	Never invent financial numbers.
-•	Be direct and useful. ““”
-supabase_headers = { “apikey”: SUPABASE_KEY, “Authorization”: f”Bearer {SUPABASE_KEY}“,”Content-Type”: “application/json”, “Prefer”: “return=minimal” }
-=========================
-BASIC HELPERS
-=========================
-def get_current_datetime(): now = datetime.now(ZoneInfo(“Europe/Berlin”)) return now.strftime(“%A, %d %B %Y, %H:%M”)
-=========================
-CHAT MEMORY
-=========================
-def save_to_supabase(user_message, assistant_response): url = f”{SUPABASE_URL}/rest/v1/events_log”
+
+* Maintain conversation flow.
+* Use explicit saved memories when relevant.
+* Understand follow-up messages.
+* Prioritize user's personal data.
+* Never invent financial numbers.
+* Be direct and useful.
+  """
+
+supabase_headers = {
+"apikey": SUPABASE_KEY,
+"Authorization": f"Bearer {SUPABASE_KEY}",
+"Content-Type": "application/json",
+"Prefer": "return=minimal"
+}
+
+# =========================
+
+# BASIC HELPERS
+
+# =========================
+
+def get_current_datetime():
+now = datetime.now(ZoneInfo("Europe/Berlin"))
+return now.strftime("%A, %d %B %Y, %H:%M")
+
+# =========================
+
+# CHAT MEMORY
+
+# =========================
+
+def save_to_supabase(user_message, assistant_response):
+url = f"{SUPABASE_URL}/rest/v1/events_log"
+
+```
 data = {
     "user_message": user_message,
     "assistant_response": assistant_response,
@@ -38,17 +90,29 @@ data = {
 }
 
 requests.post(url, headers=supabase_headers, json=data)
-def get_recent_memories(): url = f”{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=20”
+```
+
+def get_recent_memories():
+url = f"{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=20"
+
+```
 result = requests.get(url, headers=supabase_headers)
 
 if result.status_code == 200:
     return result.json()
 
 return []
-=========================
-EXPLICIT PERSONAL MEMORY
-=========================
+```
+
+# =========================
+
+# EXPLICIT PERSONAL MEMORY
+
+# =========================
+
 def save_personal_memory(memory_text):
+
+```
 url = f"{SUPABASE_URL}/rest/v1/personal_memory"
 
 data = {
@@ -66,7 +130,11 @@ if result.status_code not in [200, 201, 204]:
     return False
 
 return True
+```
+
 def get_personal_memories():
+
+```
 url = f"{SUPABASE_URL}/rest/v1/personal_memory?select=memory_text,memory_type,importance&is_active=eq.true&order=created_at.desc&limit=50"
 
 result = requests.get(url, headers=supabase_headers)
@@ -75,7 +143,11 @@ if result.status_code == 200:
     return result.json()
 
 return []
+```
+
 def detect_remember_command(message):
+
+```
 text = message.strip()
 lower = text.lower()
 
@@ -96,17 +168,28 @@ for phrase in remember_phrases:
             return memory_text
 
 return None
-=========================
-SEMANTIC MEMORY
-=========================
+```
+
+# =========================
+
+# SEMANTIC MEMORY
+
+# =========================
+
 def generate_embedding(text):
+
+```
 response = openai_client.embeddings.create(
     model="text-embedding-3-small",
     input=text
 )
 
 return response.data[0].embedding
+```
+
 def save_semantic_memory(content):
+
+```
 try:
     embedding = generate_embedding(content)
 
@@ -128,7 +211,11 @@ try:
 
 except Exception as e:
     print("Semantic memory save failed:", str(e))
+```
+
 def search_semantic_memory(query):
+
+```
 try:
     embedding = generate_embedding(query)
 
@@ -155,10 +242,17 @@ try:
 except Exception as e:
     print("Semantic search exception:", str(e))
     return []
-=========================
-FINANCE
-=========================
+```
+
+# =========================
+
+# FINANCE
+
+# =========================
+
 def classify_finance_message(message):
+
+```
 text = message.lower()
 
 amount_match = re.search(r"(\d+(\.\d+)?)", text)
@@ -230,7 +324,11 @@ return {
     "raw_user_message": message,
     "is_essential": is_essential
 }
+```
+
 def save_finance_transaction(tx):
+
+```
 url = f"{SUPABASE_URL}/rest/v1/finance_transactions"
 
 data = {
@@ -247,7 +345,11 @@ data = {
 }
 
 requests.post(url, headers=supabase_headers, json=data)
+```
+
 def get_finance_summary():
+
+```
 try:
     balance_url = f"{SUPABASE_URL}/rest/v1/finance_balance_overview?select=*"
     balance = requests.get(balance_url, headers=supabase_headers)
@@ -262,14 +364,25 @@ try:
 
 except Exception as e:
     return f"Finance fetch failed: {str(e)}"
-=========================
-GOOGLE
-=========================
+```
+
+# =========================
+
+# GOOGLE
+
+# =========================
+
 def get_google_credentials():
+
+```
 token_data = json.loads(GOOGLE_TOKEN_JSON)
 
 return Credentials.from_authorized_user_info(token_data)
+```
+
 def get_gmail_summary():
+
+```
 try:
     creds = get_google_credentials()
     service = build("gmail", "v1", credentials=creds)
@@ -314,7 +427,11 @@ try:
 
 except Exception as e:
     return f"Gmail fetch failed: {str(e)}"
+```
+
 def get_calendar_summary():
+
+```
 try:
     creds = get_google_credentials()
     service = build("calendar", "v3", credentials=creds)
@@ -335,10 +452,17 @@ try:
 
 except Exception as e:
     return f"Calendar fetch failed: {str(e)}"
-=========================
-ASANA
-=========================
+```
+
+# =========================
+
+# ASANA
+
+# =========================
+
 def get_asana_tasks():
+
+```
 try:
     headers = {
         "Authorization": f"Bearer {ASANA_TOKEN}"
@@ -370,18 +494,42 @@ try:
 
 except Exception as e:
     return f"Asana fetch failed: {str(e)}"
-=========================
-DAILY BRIEFING
-=========================
+```
+
+# =========================
+
+# DAILY BRIEFING
+
+# =========================
+
 async def send_daily_briefing(app):
+
+```
 prompt = f"""
+```
+
 Create my daily AI briefing.
-Current date/time: {get_current_datetime()}
-Personal memories: {json.dumps(get_personal_memories(), indent=2)}
-Finance: {get_finance_summary()}
-Gmail: {get_gmail_summary()}
-Calendar: {get_calendar_summary()}
-Asana: {get_asana_tasks()} ““”
+
+Current date/time:
+{get_current_datetime()}
+
+Personal memories:
+{json.dumps(get_personal_memories(), indent=2)}
+
+Finance:
+{get_finance_summary()}
+
+Gmail:
+{get_gmail_summary()}
+
+Calendar:
+{get_calendar_summary()}
+
+Asana:
+{get_asana_tasks()}
+"""
+
+```
 response = client.messages.create(
     model="claude-sonnet-4-6",
     max_tokens=800,
@@ -399,10 +547,17 @@ await app.bot.send_message(
     chat_id=ALLOWED_USER_ID,
     text=briefing
 )
-=========================
-MAIN CHAT HANDLER
-=========================
+```
+
+# =========================
+
+# MAIN CHAT HANDLER
+
+# =========================
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+```
 if update.effective_user.id != ALLOWED_USER_ID:
     return
 
@@ -438,11 +593,30 @@ if finance_tx:
 semantic_results = search_semantic_memory(user_message)
 
 semantic_context = f"""
-Relevant semantic memories: {json.dumps(semantic_results, indent=2)} ““”
+```
+
+Relevant semantic memories:
+{json.dumps(semantic_results, indent=2)}
+"""
+
+```
 runtime_context = f"""
-Current date/time: {get_current_datetime()} Timezone: Europe/Berlin ““”
+```
+
+Current date/time:
+{get_current_datetime()}
+Timezone: Europe/Berlin
+"""
+
+```
 personal_memory_context = f"""
-Explicit personal memories: {json.dumps(get_personal_memories(), indent=2)} ““”
+```
+
+Explicit personal memories:
+{json.dumps(get_personal_memories(), indent=2)}
+"""
+
+```
 finance_context = ""
 gmail_context = ""
 calendar_context = ""
@@ -515,10 +689,17 @@ reply = response.content[0].text
 save_to_supabase(user_message, reply)
 
 await update.message.reply_text(reply)
-=========================
-MAIN
-=========================
+```
+
+# =========================
+
+# MAIN
+
+# =========================
+
 def main():
+
+```
 print("Bajrang is starting...")
 
 app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -541,4 +722,7 @@ scheduler.start()
 print("Bajrang is running!")
 
 app.run_polling()
-if name == “main”: main()
+```
+
+if **name** == "**main**":
+main()
