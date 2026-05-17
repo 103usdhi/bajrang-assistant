@@ -40,11 +40,13 @@ You can use:
 - Google Calendar
 - Asana
 
-Finance rules:
-- If finance data is provided, use it.
+Rules:
+- Maintain conversation flow.
+- Understand follow-up messages using recent chat history.
+- Prioritize user's personal data.
 - Never invent financial numbers.
-- Clearly separate income, expense, saving, investment, debt, refund.
 - Be direct and useful.
+- If user says "also", "that", "same", "continue", use recent context.
 """
 
 supabase_headers = {
@@ -62,12 +64,26 @@ def get_current_datetime():
 
 def save_to_supabase(user_message, assistant_response):
     url = f"{SUPABASE_URL}/rest/v1/events_log"
+
     data = {
         "user_message": user_message,
         "assistant_response": assistant_response,
         "source": "telegram"
     }
+
     requests.post(url, headers=supabase_headers, json=data)
+
+
+def get_recent_memories():
+    url = f"{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=20"
+
+    result = requests.get(url, headers=supabase_headers)
+
+    if result.status_code == 200:
+        return result.json()
+
+    print("Memory fetch failed:", result.status_code, result.text)
+    return []
 
 
 def classify_finance_message(message):
@@ -78,12 +94,11 @@ def classify_finance_message(message):
         return None
 
     amount = float(amount_match.group(1))
-
     transaction_type = None
 
     if any(k in text for k in ["salary", "income", "received", "got paid", "bonus"]):
         transaction_type = "income"
-    elif any(k in text for k in ["spent", "paid", "bought", "cost", "expense"]):
+    elif any(k in text for k in ["spent", "paid", "bought", "cost", "expense", "also"]):
         transaction_type = "expense"
     elif any(k in text for k in ["saved", "saving"]):
         transaction_type = "saving"
@@ -164,22 +179,15 @@ def save_finance_transaction(tx):
 
 def get_finance_summary():
     try:
-        url = f"{SUPABASE_URL}/rest/v1/finance_balance_overview?select=*"
-        result = requests.get(url, headers=supabase_headers)
-
-        if result.status_code != 200:
-            return f"Finance summary failed: {result.status_code} {result.text}"
-
-        balance = result.json()
+        balance_url = f"{SUPABASE_URL}/rest/v1/finance_balance_overview?select=*"
+        balance = requests.get(balance_url, headers=supabase_headers)
 
         monthly_url = f"{SUPABASE_URL}/rest/v1/finance_current_month_spending?select=*"
         monthly = requests.get(monthly_url, headers=supabase_headers)
 
-        monthly_data = monthly.json() if monthly.status_code == 200 else []
-
         return json.dumps({
-            "balance_overview": balance,
-            "current_month_spending": monthly_data
+            "balance_overview": balance.json() if balance.status_code == 200 else [],
+            "current_month_spending": monthly.json() if monthly.status_code == 200 else []
         }, indent=2)
 
     except Exception as e:
@@ -249,18 +257,7 @@ def get_calendar_summary():
             orderBy="startTime"
         ).execute()
 
-        events = events_result.get("items", [])
-        clean_events = []
-
-        for event in events:
-            clean_events.append({
-                "title": event.get("summary"),
-                "start": event.get("start"),
-                "end": event.get("end"),
-                "location": event.get("location", "")
-            })
-
-        return json.dumps(clean_events, indent=2)
+        return json.dumps(events_result.get("items", []), indent=2)
 
     except Exception as e:
         return f"Calendar fetch failed: {str(e)}"
@@ -292,19 +289,7 @@ def get_asana_tasks():
             params=params
         )
 
-        tasks = task_response.json()["data"]
-        clean_tasks = []
-
-        for task in tasks:
-            projects = [p["name"] for p in task.get("projects", [])]
-            clean_tasks.append({
-                "task": task.get("name"),
-                "due": task.get("due_on"),
-                "completed": task.get("completed"),
-                "projects": projects
-            })
-
-        return json.dumps(clean_tasks, indent=2)
+        return json.dumps(task_response.json().get("data", []), indent=2)
 
     except Exception as e:
         return f"Asana fetch failed: {str(e)}"
@@ -400,11 +385,30 @@ Timezone: Europe/Berlin
         await send_daily_briefing(context.application)
         return
 
+    recent_memories = get_recent_memories()
+
+    conversation_history = []
+
+    for memory in reversed(recent_memories):
+        conversation_history.append({
+            "role": "user",
+            "content": memory["user_message"]
+        })
+        conversation_history.append({
+            "role": "assistant",
+            "content": memory["assistant_response"]
+        })
+
+    conversation_history.append({
+        "role": "user",
+        "content": user_message
+    })
+
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1200,
         system=SYSTEM_PROMPT + runtime_context + finance_context + gmail_context + calendar_context + asana_context,
-        messages=[{"role": "user", "content": user_message}]
+        messages=conversation_history
     )
 
     reply = response.content[0].text
