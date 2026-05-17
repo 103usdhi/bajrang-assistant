@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 
 import anthropic
 
@@ -349,18 +349,16 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
 
-    scheduler = AsyncIOScheduler(timezone="Europe/Berlin")
+ scheduler = BackgroundScheduler(timezone="Europe/Berlin")
 
-    scheduler.add_job(
-        send_daily_briefing,
-        "cron",
-        hour=8,
-        minute=0,
-        args=[app]
-    )
+scheduler.add_job(
+    lambda: app.create_task(send_daily_briefing(app)),
+    "cron",
+    hour=8,
+    minute=0
+)
 
-    scheduler.start()
-
+scheduler.start()
     print("Bajrang is running!")
 
     app.run_polling()
