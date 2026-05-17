@@ -42,11 +42,11 @@ You can use:
 
 Rules:
 - Maintain conversation flow.
+- Use explicit saved memories when relevant.
 - Understand follow-up messages using recent chat history.
 - Prioritize user's personal data.
 - Never invent financial numbers.
 - Be direct and useful.
-- If user says "also", "that", "same", "continue", use recent context.
 """
 
 supabase_headers = {
@@ -64,19 +64,16 @@ def get_current_datetime():
 
 def save_to_supabase(user_message, assistant_response):
     url = f"{SUPABASE_URL}/rest/v1/events_log"
-
     data = {
         "user_message": user_message,
         "assistant_response": assistant_response,
         "source": "telegram"
     }
-
     requests.post(url, headers=supabase_headers, json=data)
 
 
 def get_recent_memories():
     url = f"{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=20"
-
     result = requests.get(url, headers=supabase_headers)
 
     if result.status_code == 200:
@@ -84,6 +81,61 @@ def get_recent_memories():
 
     print("Memory fetch failed:", result.status_code, result.text)
     return []
+
+
+def save_personal_memory(memory_text):
+    url = f"{SUPABASE_URL}/rest/v1/personal_memory"
+
+    data = {
+        "memory_text": memory_text,
+        "memory_type": "general",
+        "importance": "medium",
+        "source": "telegram",
+        "is_active": True
+    }
+
+    result = requests.post(url, headers=supabase_headers, json=data)
+
+    if result.status_code not in [200, 201, 204]:
+        print("Personal memory save failed:", result.status_code, result.text)
+        return False
+
+    print("Personal memory saved:", result.status_code)
+    return True
+
+
+def get_personal_memories():
+    url = f"{SUPABASE_URL}/rest/v1/personal_memory?select=memory_text,memory_type,importance&is_active=eq.true&order=created_at.desc&limit=50"
+    result = requests.get(url, headers=supabase_headers)
+
+    if result.status_code == 200:
+        return result.json()
+
+    print("Personal memory fetch failed:", result.status_code, result.text)
+    return []
+
+
+def detect_remember_command(message):
+    text = message.strip()
+
+    lower = text.lower()
+
+    remember_phrases = [
+        "remember ",
+        "remember that ",
+        "please remember ",
+        "save this ",
+        "note that ",
+        "keep in mind "
+    ]
+
+    for phrase in remember_phrases:
+        if lower.startswith(phrase):
+            memory_text = text[len(phrase):].strip()
+            if memory_text:
+                return memory_text
+
+    return None
 
 
 def classify_finance_message(message):
@@ -304,6 +356,9 @@ Create my daily AI briefing.
 Current date/time:
 {get_current_datetime()}
 
+Personal memories:
+{json.dumps(get_personal_memories(), indent=2)}
+
 Finance:
 {get_finance_summary()}
 
@@ -353,6 +408,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.chat.send_action("typing")
 
+    remember_text = detect_remember_command(user_message)
+
+    if remember_text:
+        saved = save_personal_memory(remember_text)
+
+        if saved:
+            reply = f"Remembered: {remember_text}"
+        else:
+            reply = "I tried to save that, but memory storage failed."
+
+        save_to_supabase(user_message, reply)
+        await update.message.reply_text(reply)
+        return
+
     finance_tx = classify_finance_message(user_message)
 
     if finance_tx:
@@ -362,6 +431,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Current date/time:
 {get_current_datetime()}
 Timezone: Europe/Berlin
+"""
+
+    personal_memory_context = f"""
+Explicit personal memories:
+{json.dumps(get_personal_memories(), indent=2)}
 """
 
     finance_context = ""
@@ -407,7 +481,15 @@ Timezone: Europe/Berlin
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1200,
-        system=SYSTEM_PROMPT + runtime_context + finance_context + gmail_context + calendar_context + asana_context,
+        system=(
+            SYSTEM_PROMPT
+            + runtime_context
+            + personal_memory_context
+            + finance_context
+            + gmail_context
+            + calendar_context
+            + asana_context
+        ),
         messages=conversation_history
     )
 
