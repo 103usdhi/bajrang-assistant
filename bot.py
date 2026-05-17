@@ -3,12 +3,18 @@ import re
 import json
 import logging
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
 from dotenv import load_dotenv
+
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
+
 import anthropic
+
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 
 load_dotenv()
 
@@ -18,24 +24,31 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ASANA_TOKEN = os.getenv("ASANA_TOKEN")
 
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+GOOGLE_TOKEN_JSON = os.getenv("GOOGLE_TOKEN_JSON")
+
 ALLOWED_USER_ID = 8106199737
 
 logging.basicConfig(level=logging.INFO)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-SYSTEM_PROMPT = """You are Bajrang, a highly intelligent personal AI assistant.
+SYSTEM_PROMPT = """
+You are Bajrang, a highly intelligent personal AI assistant.
 
-You are connected to the user's personal memory, expenses database, and selected external APIs.
+You have access to:
+- user memory
+- expenses
+- Asana tasks
+- Gmail
+- Google Calendar
 
-Primary behavior:
-- Prioritize user's personal data first.
-- If Asana data is provided in context, use it directly.
-- Do not say you lack Asana access if Asana context is provided.
-- You are not limited to finance/tasks; answer general questions too.
-- Be direct, concise, and useful.
-- Never invent data.
-- End with one short motivational line.
+Rules:
+- prioritize user's real personal data first
+- answer naturally
+- never pretend data exists if missing
+- summarize intelligently
+- keep responses concise and useful
 """
 
 supabase_headers = {
@@ -51,6 +64,150 @@ def get_current_datetime():
     return now.strftime("%A, %d %B %Y, %H:%M")
 
 
+def get_google_credentials():
+    token_data = json.loads(GOOGLE_TOKEN_JSON)
+
+    creds = Credentials.from_authorized_user_info(
+        token_data
+    )
+
+    return creds
+
+
+def get_gmail_summary():
+    try:
+        creds = get_google_credentials()
+
+        service = build("gmail", "v1", credentials=creds)
+
+        results = service.users().messages().list(
+            userId="me",
+            maxResults=5,
+            q="in:inbox"
+        ).execute()
+
+        messages = results.get("messages", [])
+
+        email_data = []
+
+        for msg in messages:
+            message = service.users().messages().get(
+                userId="me",
+                id=msg["id"],
+                format="metadata",
+                metadataHeaders=["From", "Subject"]
+            ).execute()
+
+            headers = message.get("payload", {}).get("headers", [])
+
+            sender = ""
+            subject = ""
+
+            for header in headers:
+                if header["name"].lower() == "from":
+                    sender = header["value"]
+
+                if header["name"].lower() == "subject":
+                    subject = header["value"]
+
+            email_data.append({
+                "from": sender,
+                "subject": subject
+            })
+
+        return json.dumps(email_data, indent=2)
+
+    except Exception as e:
+        return f"Gmail fetch failed: {str(e)}"
+
+
+def get_calendar_summary():
+    try:
+        creds = get_google_credentials()
+
+        service = build("calendar", "v3", credentials=creds)
+
+        now = datetime.now(ZoneInfo("Europe/Berlin"))
+        end = now + timedelta(days=3)
+
+        events_result = service.events().list(
+            calendarId="primary",
+            timeMin=now.isoformat(),
+            timeMax=end.isoformat(),
+            maxResults=10,
+            singleEvents=True,
+            orderBy="startTime"
+        ).execute()
+
+        events = events_result.get("items", [])
+
+        clean_events = []
+
+        for event in events:
+            clean_events.append({
+                "title": event.get("summary"),
+                "start": event.get("start"),
+                "location": event.get("location")
+            })
+
+        return json.dumps(clean_events, indent=2)
+
+    except Exception as e:
+        return f"Calendar fetch failed: {str(e)}"
+
+
+def get_asana_tasks():
+    try:
+        headers = {
+            "Authorization": f"Bearer {ASANA_TOKEN}"
+        }
+
+        user_response = requests.get(
+            "https://app.asana.com/api/1.0/users/me",
+            headers=headers
+        )
+
+        user = user_response.json()["data"]
+
+        workspace_gid = user["workspaces"][0]["gid"]
+
+        params = {
+            "assignee": user["gid"],
+            "workspace": workspace_gid,
+            "completed_since": "now",
+            "limit": 10,
+            "opt_fields": "name,due_on,completed,projects.name"
+        }
+
+        task_response = requests.get(
+            "https://app.asana.com/api/1.0/tasks",
+            headers=headers,
+            params=params
+        )
+
+        tasks = task_response.json()["data"]
+
+        clean_tasks = []
+
+        for task in tasks:
+            projects = []
+
+            for p in task.get("projects", []):
+                projects.append(p["name"])
+
+            clean_tasks.append({
+                "task": task.get("name"),
+                "due": task.get("due_on"),
+                "completed": task.get("completed"),
+                "projects": projects
+            })
+
+        return json.dumps(clean_tasks, indent=2)
+
+    except Exception as e:
+        return f"Asana fetch failed: {str(e)}"
+
+
 def save_to_supabase(user_message, assistant_response):
     url = f"{SUPABASE_URL}/rest/v1/events_log"
 
@@ -60,37 +217,15 @@ def save_to_supabase(user_message, assistant_response):
         "source": "telegram"
     }
 
-    result = requests.post(url, headers=supabase_headers, json=data)
-
-    if result.status_code not in [200, 201, 204]:
-        print("Event save failed:", result.status_code, result.text)
-
-
-def save_expense(amount, category, description):
-    url = f"{SUPABASE_URL}/rest/v1/expenses"
-
-    data = {
-        "amount": amount,
-        "category": category,
-        "description": description,
-        "currency": "EUR",
-        "source": "telegram"
-    }
-
-    result = requests.post(url, headers=supabase_headers, json=data)
-
-    if result.status_code not in [200, 201, 204]:
-        print("Expense save failed:", result.status_code, result.text)
-    else:
-        print("Expense save status:", result.status_code)
+    requests.post(url, headers=supabase_headers, json=data)
 
 
 def detect_expense(user_message):
     text = user_message.lower()
 
-    expense_keywords = ["spent", "paid", "bought", "expense"]
+    keywords = ["spent", "paid", "bought"]
 
-    if not any(keyword in text for keyword in expense_keywords):
+    if not any(k in text for k in keywords):
         return None
 
     amount_match = re.search(r'(\d+(\.\d+)?)', text)
@@ -98,139 +233,23 @@ def detect_expense(user_message):
     if not amount_match:
         return None
 
-    amount = float(amount_match.group(1))
-
-    category = "general"
-
-    categories = {
-        "food": ["food", "pizza", "burger", "coffee", "restaurant", "groceries"],
-        "transport": ["uber", "taxi", "fuel", "train", "bus"],
-        "shopping": ["shopping", "amazon", "clothes", "shoes"],
-        "bills": ["rent", "internet", "electricity", "insurance"],
-        "health": ["doctor", "medicine", "hospital", "pharmacy"],
-        "entertainment": ["movie", "netflix", "party", "cinema"]
-    }
-
-    for cat, keywords in categories.items():
-        for keyword in keywords:
-            if keyword in text:
-                category = cat
-                break
-
     return {
-        "amount": amount,
-        "category": category,
+        "amount": float(amount_match.group(1)),
         "description": user_message
     }
 
 
-def get_recent_memories():
-    url = f"{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=5"
+def save_expense(amount, description):
+    url = f"{SUPABASE_URL}/rest/v1/expenses"
 
-    result = requests.get(url, headers=supabase_headers)
-
-    if result.status_code == 200:
-        return result.json()
-
-    print("Memory fetch failed:", result.status_code, result.text)
-    return []
-
-
-def asana_headers():
-    return {
-        "Authorization": f"Bearer {ASANA_TOKEN}",
-        "Accept": "application/json"
+    data = {
+        "amount": amount,
+        "description": description,
+        "currency": "EUR",
+        "source": "telegram"
     }
 
-
-def get_asana_user():
-    url = "https://app.asana.com/api/1.0/users/me"
-    response = requests.get(url, headers=asana_headers())
-
-    print("ASANA USER STATUS:", response.status_code)
-
-    if response.status_code != 200:
-        print("ASANA USER ERROR:", response.text)
-        return None
-
-    return response.json().get("data")
-
-
-def get_asana_tasks():
-    if not ASANA_TOKEN:
-        return "ASANA_TOKEN is missing."
-
-    user = get_asana_user()
-
-    if not user:
-        return "Could not fetch Asana user."
-
-    workspaces = user.get("workspaces", [])
-
-    if not workspaces:
-        return "No Asana workspaces found."
-
-    workspace_gid = workspaces[0]["gid"]
-    user_gid = user["gid"]
-
-    url = "https://app.asana.com/api/1.0/tasks"
-
-    params = {
-        "assignee": user_gid,
-        "workspace": workspace_gid,
-        "completed_since": "now",
-        "limit": 20,
-        "opt_fields": "gid,name,completed,due_on,due_at,created_at,modified_at,projects.name,workspace.name,permalink_url"
-    }
-
-    response = requests.get(url, headers=asana_headers(), params=params)
-
-    print("ASANA TASKS STATUS:", response.status_code)
-
-    if response.status_code != 200:
-        print("ASANA TASKS ERROR:", response.text)
-        return f"Asana task fetch failed: {response.status_code} {response.text}"
-
-    tasks = response.json().get("data", [])
-
-    if not tasks:
-        return "No open Asana tasks found for your user."
-
-    clean_tasks = []
-
-    for task in tasks:
-        project_names = []
-
-        for project in task.get("projects", []):
-            project_names.append(project.get("name"))
-
-        clean_tasks.append({
-            "name": task.get("name"),
-            "due_on": task.get("due_on"),
-            "completed": task.get("completed"),
-            "projects": project_names,
-            "url": task.get("permalink_url")
-        })
-
-    return json.dumps(clean_tasks, indent=2)
-
-
-def is_asana_request(message):
-    text = message.lower()
-
-    keywords = [
-        "asana",
-        "task",
-        "tasks",
-        "pending",
-        "overdue",
-        "project",
-        "projects",
-        "summarize my asana",
-        "what did you read from asana"
-    ]
-
-    return any(keyword in text for keyword in keywords)
+    requests.post(url, headers=supabase_headers, json=data)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -243,24 +262,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.chat.send_action("typing")
 
-    current_datetime = get_current_datetime()
-
     runtime_context = f"""
-
-Runtime context:
-- Current date and time: {current_datetime}
-- Timezone: Europe/Berlin
-- User location context: Germany
+Current datetime:
+{get_current_datetime()}
 """
 
+    gmail_context = ""
+    calendar_context = ""
     asana_context = ""
 
-    if is_asana_request(user_message):
-        asana_data = get_asana_tasks()
+    text = user_message.lower()
+
+    if "email" in text or "gmail" in text:
+        gmail_context = f"""
+
+Gmail live data:
+{get_gmail_summary()}
+"""
+
+    if "calendar" in text or "meeting" in text or "schedule" in text:
+        calendar_context = f"""
+
+Calendar live data:
+{get_calendar_summary()}
+"""
+
+    if "asana" in text or "task" in text or "project" in text:
         asana_context = f"""
 
 Asana live data:
-{asana_data}
+{get_asana_tasks()}
 """
 
     expense = detect_expense(user_message)
@@ -268,35 +299,23 @@ Asana live data:
     if expense:
         save_expense(
             expense["amount"],
-            expense["category"],
             expense["description"]
         )
-
-    recent_memories = get_recent_memories()
-
-    conversation_history = []
-
-    for memory in reversed(recent_memories):
-        conversation_history.append({
-            "role": "user",
-            "content": memory["user_message"]
-        })
-
-        conversation_history.append({
-            "role": "assistant",
-            "content": memory["assistant_response"]
-        })
-
-    conversation_history.append({
-        "role": "user",
-        "content": user_message
-    })
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1200,
-        system=SYSTEM_PROMPT + runtime_context + asana_context,
-        messages=conversation_history
+        system=SYSTEM_PROMPT
+        + runtime_context
+        + gmail_context
+        + calendar_context
+        + asana_context,
+        messages=[
+            {
+                "role": "user",
+                "content": user_message
+            }
+        ]
     )
 
     reply = response.content[0].text
