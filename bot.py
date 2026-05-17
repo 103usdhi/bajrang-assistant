@@ -26,29 +26,16 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 SYSTEM_PROMPT = """You are Bajrang, a highly intelligent personal AI assistant.
 
-Your primary responsibility is to help the user using:
-- personal memory
-- saved data
-- expenses
-- goals
-- priorities
-- tasks
-- decisions
-- planning
+You are connected to the user's personal memory, expenses database, and selected external APIs.
 
-However:
-- you are NOT limited to those topics.
-- you can answer general questions normally like a modern AI assistant.
-- when personal context exists, prioritize it first.
-- when personal context does not exist, answer using general intelligence.
-
-Rules:
-- Be direct and concise.
-- Avoid unnecessary fluff.
-- Use runtime context when available.
-- Use memory when relevant.
-- Never pretend data exists when it does not.
-- Respond naturally like a premium AI assistant.
+Primary behavior:
+- Prioritize user's personal data first.
+- If Asana data is provided in context, use it directly.
+- Do not say you lack Asana access if Asana context is provided.
+- You are not limited to finance/tasks; answer general questions too.
+- Be direct, concise, and useful.
+- Never invent data.
+- End with one short motivational line.
 """
 
 supabase_headers = {
@@ -149,25 +136,101 @@ def get_recent_memories():
     return []
 
 
-def test_asana_connection():
-    if not ASANA_TOKEN:
-        print("ASANA TEST: ASANA_TOKEN missing")
-        return
-
-    asana_headers = {
-        "Authorization": f"Bearer {ASANA_TOKEN}"
+def asana_headers():
+    return {
+        "Authorization": f"Bearer {ASANA_TOKEN}",
+        "Accept": "application/json"
     }
 
-    url = "https://app.asana.com/api/1.0/tasks?limit=5"
 
-    response = requests.get(url, headers=asana_headers)
+def get_asana_user():
+    url = "https://app.asana.com/api/1.0/users/me"
+    response = requests.get(url, headers=asana_headers())
 
-    print("ASANA STATUS:", response.status_code)
+    print("ASANA USER STATUS:", response.status_code)
 
-    try:
-        print("ASANA RESPONSE:", json.dumps(response.json(), indent=2))
-    except Exception:
-        print("ASANA RAW RESPONSE:", response.text)
+    if response.status_code != 200:
+        print("ASANA USER ERROR:", response.text)
+        return None
+
+    return response.json().get("data")
+
+
+def get_asana_tasks():
+    if not ASANA_TOKEN:
+        return "ASANA_TOKEN is missing."
+
+    user = get_asana_user()
+
+    if not user:
+        return "Could not fetch Asana user."
+
+    workspaces = user.get("workspaces", [])
+
+    if not workspaces:
+        return "No Asana workspaces found."
+
+    workspace_gid = workspaces[0]["gid"]
+    user_gid = user["gid"]
+
+    url = "https://app.asana.com/api/1.0/tasks"
+
+    params = {
+        "assignee": user_gid,
+        "workspace": workspace_gid,
+        "completed_since": "now",
+        "limit": 20,
+        "opt_fields": "gid,name,completed,due_on,due_at,created_at,modified_at,projects.name,workspace.name,permalink_url"
+    }
+
+    response = requests.get(url, headers=asana_headers(), params=params)
+
+    print("ASANA TASKS STATUS:", response.status_code)
+
+    if response.status_code != 200:
+        print("ASANA TASKS ERROR:", response.text)
+        return f"Asana task fetch failed: {response.status_code} {response.text}"
+
+    tasks = response.json().get("data", [])
+
+    if not tasks:
+        return "No open Asana tasks found for your user."
+
+    clean_tasks = []
+
+    for task in tasks:
+        project_names = []
+
+        for project in task.get("projects", []):
+            project_names.append(project.get("name"))
+
+        clean_tasks.append({
+            "name": task.get("name"),
+            "due_on": task.get("due_on"),
+            "completed": task.get("completed"),
+            "projects": project_names,
+            "url": task.get("permalink_url")
+        })
+
+    return json.dumps(clean_tasks, indent=2)
+
+
+def is_asana_request(message):
+    text = message.lower()
+
+    keywords = [
+        "asana",
+        "task",
+        "tasks",
+        "pending",
+        "overdue",
+        "project",
+        "projects",
+        "summarize my asana",
+        "what did you read from asana"
+    ]
+
+    return any(keyword in text for keyword in keywords)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -180,12 +243,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.chat.send_action("typing")
 
-    # Temporary Asana API test
-    if "test asana" in user_message.lower():
-        test_asana_connection()
-        await update.message.reply_text("Asana test executed. Check Render logs.")
-        return
-
     current_datetime = get_current_datetime()
 
     runtime_context = f"""
@@ -194,6 +251,16 @@ Runtime context:
 - Current date and time: {current_datetime}
 - Timezone: Europe/Berlin
 - User location context: Germany
+"""
+
+    asana_context = ""
+
+    if is_asana_request(user_message):
+        asana_data = get_asana_tasks()
+        asana_context = f"""
+
+Asana live data:
+{asana_data}
 """
 
     expense = detect_expense(user_message)
@@ -227,8 +294,8 @@ Runtime context:
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=1000,
-        system=SYSTEM_PROMPT + runtime_context,
+        max_tokens=1200,
+        system=SYSTEM_PROMPT + runtime_context + asana_context,
         messages=conversation_history
     )
 
