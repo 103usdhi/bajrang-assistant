@@ -128,7 +128,7 @@ def get_calendar_summary():
         service = build("calendar", "v3", credentials=creds)
 
         now = datetime.now(ZoneInfo("Europe/Berlin"))
-        end = now + timedelta(days=3)
+        end = now + timedelta(days=30)
 
         events_result = service.events().list(
             calendarId="primary",
