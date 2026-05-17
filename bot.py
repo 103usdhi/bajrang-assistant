@@ -70,8 +70,8 @@ supabase_headers = {
 # =========================
 
 def get_current_datetime():
-now = datetime.now(ZoneInfo("Europe/Berlin"))
-return now.strftime("%A, %d %B %Y, %H:%M")
+    now = datetime.now(ZoneInfo("Europe/Berlin"))
+    return now.strftime("%A, %d %B %Y, %H:%M")
 
 # =========================
 
