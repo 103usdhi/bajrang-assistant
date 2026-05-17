@@ -402,7 +402,7 @@ Personal memories:
     })
 
     response = client.messages.create(
-        model="claude-3-7-sonnet-20250219"
+        model="claude-3-7-sonnet-20250219",
         max_tokens=1200,
         system=(
             SYSTEM_PROMPT
