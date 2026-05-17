@@ -31,21 +31,20 @@ logging.basicConfig(level=logging.INFO)
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 SYSTEM_PROMPT = """
-You are Bajrang, a highly intelligent personal AI assistant.
+You are Bajrang, a personal AI assistant.
 
 You can use:
 - personal memory
-- expenses
+- finance database
 - Gmail
 - Google Calendar
 - Asana
 
-Rules:
-- prioritize user's real personal data
-- be direct and useful
-- never invent data
-- answer naturally
-- keep replies concise
+Finance rules:
+- If finance data is provided, use it.
+- Never invent financial numbers.
+- Clearly separate income, expense, saving, investment, debt, refund.
+- Be direct and useful.
 """
 
 supabase_headers = {
@@ -59,6 +58,132 @@ supabase_headers = {
 def get_current_datetime():
     now = datetime.now(ZoneInfo("Europe/Berlin"))
     return now.strftime("%A, %d %B %Y, %H:%M")
+
+
+def save_to_supabase(user_message, assistant_response):
+    url = f"{SUPABASE_URL}/rest/v1/events_log"
+    data = {
+        "user_message": user_message,
+        "assistant_response": assistant_response,
+        "source": "telegram"
+    }
+    requests.post(url, headers=supabase_headers, json=data)
+
+
+def classify_finance_message(message):
+    text = message.lower()
+
+    amount_match = re.search(r"(\d+(\.\d+)?)", text)
+    if not amount_match:
+        return None
+
+    amount = float(amount_match.group(1))
+
+    transaction_type = None
+
+    if any(k in text for k in ["salary", "income", "received", "got paid", "bonus"]):
+        transaction_type = "income"
+    elif any(k in text for k in ["spent", "paid", "bought", "cost", "expense"]):
+        transaction_type = "expense"
+    elif any(k in text for k in ["saved", "saving"]):
+        transaction_type = "saving"
+    elif any(k in text for k in ["invested", "investment", "etf", "stock"]):
+        transaction_type = "investment"
+    elif any(k in text for k in ["loan", "emi", "debt"]):
+        transaction_type = "debt_payment"
+    elif any(k in text for k in ["refund", "returned"]):
+        transaction_type = "refund"
+
+    if not transaction_type:
+        return None
+
+    category = "general"
+    subcategory = None
+    is_essential = False
+
+    rules = {
+        "salary": ("salary", None, True),
+        "rent": ("rent", "housing", True),
+        "rewe": ("groceries", "food", True),
+        "aldi": ("groceries", "food", True),
+        "lidl": ("groceries", "food", True),
+        "edeka": ("groceries", "food", True),
+        "pizza": ("restaurant", "food", False),
+        "burger": ("restaurant", "food", False),
+        "coffee": ("coffee", "food", False),
+        "train": ("train", "transport", True),
+        "taxi": ("taxi", "transport", False),
+        "uber": ("uber", "transport", False),
+        "amazon": ("shopping", "lifestyle", False),
+        "netflix": ("subscriptions", "lifestyle", False),
+        "internet": ("internet", "housing", True),
+        "electricity": ("electricity", "housing", True),
+        "insurance": ("insurance", "health", True),
+        "medicine": ("medicine", "health", True)
+    }
+
+    for keyword, values in rules.items():
+        if keyword in text:
+            category, subcategory, is_essential = values
+            break
+
+    return {
+        "amount": amount,
+        "transaction_type": transaction_type,
+        "category": category,
+        "subcategory": subcategory,
+        "description": message,
+        "raw_user_message": message,
+        "is_essential": is_essential
+    }
+
+
+def save_finance_transaction(tx):
+    url = f"{SUPABASE_URL}/rest/v1/finance_transactions"
+
+    data = {
+        "amount": tx["amount"],
+        "currency": "EUR",
+        "transaction_type": tx["transaction_type"],
+        "category": tx["category"],
+        "subcategory": tx["subcategory"],
+        "description": tx["description"],
+        "raw_user_message": tx["raw_user_message"],
+        "source": "telegram",
+        "is_essential": tx["is_essential"],
+        "confidence_score": 0.85
+    }
+
+    result = requests.post(url, headers=supabase_headers, json=data)
+
+    if result.status_code not in [200, 201, 204]:
+        print("Finance save failed:", result.status_code, result.text)
+    else:
+        print("Finance transaction saved:", result.status_code)
+
+
+def get_finance_summary():
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/finance_balance_overview?select=*"
+        result = requests.get(url, headers=supabase_headers)
+
+        if result.status_code != 200:
+            return f"Finance summary failed: {result.status_code} {result.text}"
+
+        balance = result.json()
+
+        monthly_url = f"{SUPABASE_URL}/rest/v1/finance_current_month_spending?select=*"
+        monthly = requests.get(monthly_url, headers=supabase_headers)
+
+        monthly_data = monthly.json() if monthly.status_code == 200 else []
+
+        return json.dumps({
+            "balance_overview": balance,
+            "current_month_spending": monthly_data
+        }, indent=2)
+
+    except Exception as e:
+        return f"Finance fetch failed: {str(e)}"
 
 
 def get_google_credentials():
@@ -89,16 +214,14 @@ def get_gmail_summary():
             ).execute()
 
             headers = message.get("payload", {}).get("headers", [])
-
             email = {"from": "", "subject": "", "date": ""}
 
             for h in headers:
-                name = h["name"].lower()
-                if name == "from":
+                if h["name"].lower() == "from":
                     email["from"] = h["value"]
-                elif name == "subject":
+                elif h["name"].lower() == "subject":
                     email["subject"] = h["value"]
-                elif name == "date":
+                elif h["name"].lower() == "date":
                     email["date"] = h["value"]
 
             emails.append(email)
@@ -174,7 +297,6 @@ def get_asana_tasks():
 
         for task in tasks:
             projects = [p["name"] for p in task.get("projects", [])]
-
             clean_tasks.append({
                 "task": task.get("name"),
                 "due": task.get("due_on"),
@@ -188,88 +310,41 @@ def get_asana_tasks():
         return f"Asana fetch failed: {str(e)}"
 
 
-def save_to_supabase(user_message, assistant_response):
-    url = f"{SUPABASE_URL}/rest/v1/events_log"
-
-    data = {
-        "user_message": user_message,
-        "assistant_response": assistant_response,
-        "source": "telegram"
-    }
-
-    requests.post(url, headers=supabase_headers, json=data)
-
-
-def detect_expense(user_message):
-    text = user_message.lower()
-
-    if not any(k in text for k in ["spent", "paid", "bought"]):
-        return None
-
-    amount_match = re.search(r"(\d+(\.\d+)?)", text)
-
-    if not amount_match:
-        return None
-
-    return {
-        "amount": float(amount_match.group(1)),
-        "description": user_message
-    }
-
-
-def save_expense(amount, description):
-    url = f"{SUPABASE_URL}/rest/v1/expenses"
-
-    data = {
-        "amount": amount,
-        "description": description,
-        "currency": "EUR",
-        "source": "telegram"
-    }
-
-    requests.post(url, headers=supabase_headers, json=data)
-
-
 async def send_daily_briefing(app):
     print("Running daily briefing...")
 
-    gmail_data = get_gmail_summary()
-    calendar_data = get_calendar_summary()
-    asana_data = get_asana_tasks()
-
-    briefing_prompt = f"""
+    prompt = f"""
 Create my daily AI briefing.
 
 Current date/time:
 {get_current_datetime()}
 
+Finance:
+{get_finance_summary()}
+
 Gmail:
-{gmail_data}
+{get_gmail_summary()}
 
 Calendar:
-{calendar_data}
+{get_calendar_summary()}
 
 Asana:
-{asana_data}
+{get_asana_tasks()}
 
 Output:
 - greeting
-- today's meetings
+- finance warning if needed
 - important emails
+- calendar items
 - Asana priorities
 - top 3 actions
-- keep it concise
+- concise
 """
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=700,
-        messages=[
-            {
-                "role": "user",
-                "content": briefing_prompt
-            }
-        ]
+        max_tokens=800,
+        messages=[{"role": "user", "content": prompt}]
     )
 
     briefing = response.content[0].text
@@ -293,9 +368,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.chat.send_action("typing")
 
+    finance_tx = classify_finance_message(user_message)
+
+    if finance_tx:
+        save_finance_transaction(finance_tx)
+
+    runtime_context = f"""
+Current date/time:
+{get_current_datetime()}
+Timezone: Europe/Berlin
+"""
+
+    finance_context = ""
     gmail_context = ""
     calendar_context = ""
     asana_context = ""
+
+    if any(k in text for k in ["finance", "money", "balance", "spend", "spent", "expense", "salary", "income", "budget"]):
+        finance_context = f"\n\nFinance live data:\n{get_finance_summary()}"
 
     if "email" in text or "gmail" in text:
         gmail_context = f"\n\nGmail live data:\n{get_gmail_summary()}"
@@ -310,27 +400,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_daily_briefing(context.application)
         return
 
-    expense = detect_expense(user_message)
-
-    if expense:
-        save_expense(expense["amount"], expense["description"])
-
-    runtime_context = f"""
-Current date/time:
-{get_current_datetime()}
-Timezone: Europe/Berlin
-"""
-
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1200,
-        system=SYSTEM_PROMPT + runtime_context + gmail_context + calendar_context + asana_context,
-        messages=[
-            {
-                "role": "user",
-                "content": user_message
-            }
-        ]
+        system=SYSTEM_PROMPT + runtime_context + finance_context + gmail_context + calendar_context + asana_context,
+        messages=[{"role": "user", "content": user_message}]
     )
 
     reply = response.content[0].text
