@@ -158,7 +158,7 @@ def test_asana_connection():
         "Authorization": f"Bearer {ASANA_TOKEN}"
     }
 
-    url = "https://app.asana.com/api/1.0/users/me"
+    url = "https://app.asana.com/api/1.0/tasks?limit=5"
 
     response = requests.get(url, headers=asana_headers)
 
