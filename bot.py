@@ -415,6 +415,184 @@ def create_asana_task(task_name):
     except Exception as e:
         return f"Asana error: {str(e)}"
 
+# =========================
+# SYSTEM STATUS
+# =========================
+
+def get_system_status():
+
+    report = {}
+
+    # Current time
+    report["current_time"] = get_current_datetime()
+
+    # Supabase connection
+    try:
+
+        test_url = f"{SUPABASE_URL}/rest/v1/events_log?select=id&limit=1"
+
+        result = requests.get(
+            test_url,
+            headers=supabase_headers
+        )
+
+        report["supabase"] = (
+            "connected"
+            if result.status_code == 200
+            else "failed"
+        )
+
+    except Exception as e:
+        report["supabase"] = str(e)
+
+    # Events log count
+    try:
+
+        url = f"{SUPABASE_URL}/rest/v1/events_log?select=id"
+
+        result = requests.get(
+            url,
+            headers=supabase_headers
+        )
+
+        report["events_log_count"] = (
+            len(result.json())
+            if result.status_code == 200
+            else "failed"
+        )
+
+    except:
+        report["events_log_count"] = "failed"
+
+    # Personal memory count
+    try:
+
+        url = f"{SUPABASE_URL}/rest/v1/personal_memory?select=id"
+
+        result = requests.get(
+            url,
+            headers=supabase_headers
+        )
+
+        report["personal_memory_count"] = (
+            len(result.json())
+            if result.status_code == 200
+            else "failed"
+        )
+
+    except:
+        report["personal_memory_count"] = "failed"
+
+    # Semantic memory count
+    try:
+
+        url = f"{SUPABASE_URL}/rest/v1/semantic_memory?select=id"
+
+        result = requests.get(
+            url,
+            headers=supabase_headers
+        )
+
+        report["semantic_memory_count"] = (
+            len(result.json())
+            if result.status_code == 200
+            else "failed"
+        )
+
+    except:
+        report["semantic_memory_count"] = "failed"
+
+    # Finance transaction count
+    try:
+
+        url = f"{SUPABASE_URL}/rest/v1/finance_transactions?select=id"
+
+        result = requests.get(
+            url,
+            headers=supabase_headers
+        )
+
+        report["finance_transactions_count"] = (
+            len(result.json())
+            if result.status_code == 200
+            else "failed"
+        )
+
+    except:
+        report["finance_transactions_count"] = "failed"
+
+    # Gmail
+    try:
+
+        gmail = get_gmail_summary()
+
+        if "failed" in gmail.lower():
+            report["gmail"] = "failed"
+        else:
+            report["gmail"] = "connected"
+
+    except:
+        report["gmail"] = "failed"
+
+    # Calendar
+    try:
+
+        calendar = get_calendar_summary()
+
+        if "failed" in calendar.lower():
+            report["calendar"] = "failed"
+        else:
+            report["calendar"] = "connected"
+
+    except:
+        report["calendar"] = "failed"
+
+    # Asana
+    try:
+
+        asana = get_asana_tasks()
+
+        if "failed" in asana.lower():
+            report["asana"] = "failed"
+        else:
+            report["asana"] = "connected"
+
+    except:
+        report["asana"] = "failed"
+
+    # OpenAI
+    try:
+
+        if openai_client:
+            embedding = generate_embedding("test")
+            report["openai_embeddings"] = "connected"
+        else:
+            report["openai_embeddings"] = "disabled"
+
+    except:
+        report["openai_embeddings"] = "failed"
+
+    # Claude
+    try:
+
+        test = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=10,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "hello"
+                }
+            ]
+        )
+
+        report["claude"] = "connected"
+
+    except:
+        report["claude"] = "failed"
+
+    return json.dumps(report, indent=2)
+
 
 async def send_daily_briefing(app):
     prompt = f"""
@@ -547,6 +725,15 @@ Personal memories:
     if "daily briefing" in text or "morning briefing" in text:
         await send_daily_briefing(context.application)
         return
+	
+    if text == "system status":
+
+        status = get_system_status()
+
+        await update.message.reply_text(status)
+
+        return
+
 
     recent_memories = get_recent_memories()
 
