@@ -63,30 +63,22 @@ def get_current_datetime():
 
 def save_to_supabase(user_message, assistant_response):
     url = f"{SUPABASE_URL}/rest/v1/events_log"
-
     data = {
         "user_message": user_message,
         "assistant_response": assistant_response,
         "source": "telegram"
     }
-
     requests.post(url, headers=supabase_headers, json=data)
 
 
 def get_recent_memories():
     url = f"{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=20"
-
     result = requests.get(url, headers=supabase_headers)
-
-    if result.status_code == 200:
-        return result.json()
-
-    return []
+    return result.json() if result.status_code == 200 else []
 
 
 def save_personal_memory(memory_text):
     url = f"{SUPABASE_URL}/rest/v1/personal_memory"
-
     data = {
         "memory_text": memory_text,
         "memory_type": "general",
@@ -94,36 +86,21 @@ def save_personal_memory(memory_text):
         "source": "telegram",
         "is_active": True
     }
-
     result = requests.post(url, headers=supabase_headers, json=data)
-
     return result.status_code in [200, 201, 204]
 
 
 def get_personal_memories():
     url = f"{SUPABASE_URL}/rest/v1/personal_memory?select=memory_text&is_active=eq.true&order=created_at.desc&limit=50"
-
     result = requests.get(url, headers=supabase_headers)
-
-    if result.status_code == 200:
-        return result.json()
-
-    return []
+    return result.json() if result.status_code == 200 else []
 
 
 def detect_remember_command(message):
     lower = message.lower()
+    phrases = ["remember ", "remember that ", "please remember ", "save this ", "note that ", "keep in mind "]
 
-    remember_phrases = [
-        "remember ",
-        "remember that ",
-        "please remember ",
-        "save this ",
-        "note that ",
-        "keep in mind "
-    ]
-
-    for phrase in remember_phrases:
+    for phrase in phrases:
         if lower.startswith(phrase):
             memory_text = message[len(phrase):].strip()
             if memory_text:
@@ -137,7 +114,6 @@ def generate_embedding(text):
         model="text-embedding-3-small",
         input=text
     )
-
     return response.data[0].embedding
 
 
@@ -147,17 +123,13 @@ def save_semantic_memory(content):
 
     try:
         embedding = generate_embedding(content)
-
         url = f"{SUPABASE_URL}/rest/v1/semantic_memory"
-
         data = {
             "content": content,
             "source": "telegram",
             "embedding": embedding
         }
-
         requests.post(url, headers=supabase_headers, json=data)
-
     except Exception as e:
         print("Semantic save failed:", str(e))
 
@@ -168,22 +140,14 @@ def search_semantic_memory(query):
 
     try:
         embedding = generate_embedding(query)
-
         url = f"{SUPABASE_URL}/rest/v1/rpc/match_semantic_memory"
-
         data = {
             "query_embedding": embedding,
             "match_threshold": 0.70,
             "match_count": 5
         }
-
         result = requests.post(url, headers=supabase_headers, json=data)
-
-        if result.status_code == 200:
-            return result.json()
-
-        return []
-
+        return result.json() if result.status_code == 200 else []
     except Exception as e:
         print("Semantic search failed:", str(e))
         return []
@@ -191,14 +155,12 @@ def search_semantic_memory(query):
 
 def classify_finance_message(message):
     text = message.lower()
-
     amount_match = re.search(r"(\d+(\.\d+)?)", text)
 
     if not amount_match:
         return None
 
     amount = float(amount_match.group(1))
-
     transaction_type = None
 
     if any(k in text for k in ["salary", "income", "received", "bonus", "got paid"]):
@@ -260,7 +222,6 @@ def classify_finance_message(message):
 
 def save_finance_transaction(tx):
     url = f"{SUPABASE_URL}/rest/v1/finance_transactions"
-
     data = {
         "amount": tx["amount"],
         "currency": "EUR",
@@ -273,7 +234,6 @@ def save_finance_transaction(tx):
         "is_essential": tx["is_essential"],
         "confidence_score": 0.85
     }
-
     requests.post(url, headers=supabase_headers, json=data)
 
 
@@ -289,7 +249,6 @@ def get_finance_summary():
             "balance_overview": balance.json() if balance.status_code == 200 else [],
             "current_month_spending": monthly.json() if monthly.status_code == 200 else []
         }, indent=2)
-
     except Exception as e:
         return f"Finance fetch failed: {str(e)}"
 
@@ -299,7 +258,6 @@ def get_google_credentials():
         return None
 
     token_data = json.loads(GOOGLE_TOKEN_JSON)
-
     return Credentials.from_authorized_user_info(token_data)
 
 
@@ -330,12 +288,7 @@ def get_gmail_summary():
             ).execute()
 
             headers = message.get("payload", {}).get("headers", [])
-
-            email = {
-                "from": "",
-                "subject": "",
-                "date": ""
-            }
+            email = {"from": "", "subject": "", "date": ""}
 
             for h in headers:
                 if h["name"].lower() == "from":
@@ -348,7 +301,6 @@ def get_gmail_summary():
             emails.append(email)
 
         return json.dumps(emails, indent=2)
-
     except Exception as e:
         return f"Gmail fetch failed: {str(e)}"
 
@@ -375,9 +327,22 @@ def get_calendar_summary():
         ).execute()
 
         return json.dumps(events_result.get("items", []), indent=2)
-
     except Exception as e:
         return f"Calendar fetch failed: {str(e)}"
+
+
+def get_asana_user():
+    headers = {"Authorization": f"Bearer {ASANA_TOKEN}"}
+
+    response = requests.get(
+        "https://app.asana.com/api/1.0/users/me",
+        headers=headers
+    )
+
+    if response.status_code != 200:
+        return None
+
+    return response.json()["data"]
 
 
 def get_asana_tasks():
@@ -385,16 +350,12 @@ def get_asana_tasks():
         if not ASANA_TOKEN:
             return "Asana token missing."
 
-        headers = {
-            "Authorization": f"Bearer {ASANA_TOKEN}"
-        }
+        user = get_asana_user()
 
-        user_response = requests.get(
-            "https://app.asana.com/api/1.0/users/me",
-            headers=headers
-        )
+        if not user:
+            return "Could not fetch Asana user."
 
-        user = user_response.json()["data"]
+        headers = {"Authorization": f"Bearer {ASANA_TOKEN}"}
         workspace_gid = user["workspaces"][0]["gid"]
 
         params = {
@@ -412,9 +373,47 @@ def get_asana_tasks():
         )
 
         return json.dumps(task_response.json().get("data", []), indent=2)
-
     except Exception as e:
         return f"Asana fetch failed: {str(e)}"
+
+
+def create_asana_task(task_name):
+    try:
+        if not ASANA_TOKEN:
+            return "Asana token missing."
+
+        user = get_asana_user()
+
+        if not user:
+            return "Could not fetch Asana user."
+
+        headers = {
+            "Authorization": f"Bearer {ASANA_TOKEN}",
+            "Content-Type": "application/json"
+        }
+
+        workspace_gid = user["workspaces"][0]["gid"]
+
+        data = {
+            "data": {
+                "name": task_name,
+                "workspace": workspace_gid,
+                "assignee": user["gid"]
+            }
+        }
+
+        response = requests.post(
+            "https://app.asana.com/api/1.0/tasks",
+            headers=headers,
+            json=data
+        )
+
+        if response.status_code in [200, 201]:
+            return f"Asana task created: {task_name}"
+
+        return f"Asana task creation failed: {response.status_code} {response.text}"
+    except Exception as e:
+        return f"Asana error: {str(e)}"
 
 
 async def send_daily_briefing(app):
@@ -491,6 +490,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply)
+        return
+
+    if text.startswith("create task ") or text.startswith("add task "):
+        task_name = user_message.replace("create task", "").replace("add task", "").strip()
+
+        if not task_name:
+            await update.message.reply_text("Please provide a task name.")
+            return
+
+        result = create_asana_task(task_name)
+        save_to_supabase(user_message, result)
+        await update.message.reply_text(result)
         return
 
     finance_tx = classify_finance_message(user_message)
