@@ -416,6 +416,131 @@ def create_asana_task(task_name):
         return f"Asana error: {str(e)}"
 
 # =========================
+# FINANCE ANALYTICS
+# =========================
+
+def get_monthly_spending_breakdown():
+
+    try:
+
+        url = (
+            f"{SUPABASE_URL}/rest/v1/"
+            "finance_transactions"
+            "?select=amount,category,transaction_type"
+        )
+
+        result = requests.get(
+            url,
+            headers=supabase_headers
+        )
+
+        if result.status_code != 200:
+            return "Finance analytics failed."
+
+        rows = result.json()
+
+        category_totals = {}
+        total_spending = 0
+
+        for row in rows:
+
+            if row["transaction_type"] != "expense":
+                continue
+
+            category = row["category"] or "general"
+            amount = float(row["amount"])
+
+            total_spending += amount
+
+            if category not in category_totals:
+                category_totals[category] = 0
+
+            category_totals[category] += amount
+
+        sorted_categories = sorted(
+            category_totals.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        report = {
+            "total_spending": round(total_spending, 2),
+            "top_categories": sorted_categories[:10]
+        }
+
+        return json.dumps(report, indent=2)
+
+    except Exception as e:
+        return f"Finance analytics failed: {str(e)}"
+
+
+def get_overspending_insights():
+
+    try:
+
+        url = (
+            f"{SUPABASE_URL}/rest/v1/"
+            "finance_transactions"
+            "?select=amount,category,transaction_type,is_essential"
+        )
+
+        result = requests.get(
+            url,
+            headers=supabase_headers
+        )
+
+        if result.status_code != 200:
+            return "Overspending analysis failed."
+
+        rows = result.json()
+
+        essential = 0
+        non_essential = 0
+
+        categories = {}
+
+        for row in rows:
+
+            if row["transaction_type"] != "expense":
+                continue
+
+            amount = float(row["amount"])
+
+            if row["is_essential"]:
+                essential += amount
+            else:
+                non_essential += amount
+
+            category = row["category"] or "general"
+
+            if category not in categories:
+                categories[category] = 0
+
+            categories[category] += amount
+
+        biggest = sorted(
+            categories.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:5]
+
+        insights = {
+            "essential_spending": round(essential, 2),
+            "non_essential_spending": round(non_essential, 2),
+            "top_expense_categories": biggest,
+            "warning": (
+                "High non-essential spending detected."
+                if non_essential > essential
+                else "Spending pattern looks balanced."
+            )
+        }
+
+        return json.dumps(insights, indent=2)
+
+    except Exception as e:
+        return f"Overspending analysis failed: {str(e)}"
+
+# =========================
 # SYSTEM STATUS
 # =========================
 
@@ -731,6 +856,22 @@ Personal memories:
         status = get_system_status()
 
         await update.message.reply_text(status)
+
+        return
+
+    if text == "finance report":
+
+        report = get_monthly_spending_breakdown()
+
+        await update.message.reply_text(report)
+
+        return
+
+    if text == "where am i overspending":
+
+        insights = get_overspending_insights()
+
+        await update.message.reply_text(insights)
 
         return
 
