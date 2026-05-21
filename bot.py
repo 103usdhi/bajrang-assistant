@@ -754,9 +754,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER_ID:
         return
 
+    if not update.message or not update.message.text:
+        return
+
     user_message = update.message.text
-    text = user_message.lower()
-    
+    text = user_message.lower().strip()
+
+    # Simple menu/help
     if text in ["menu", "start", "help"]:
         await update.message.reply_text(
             "Choose an action:",
@@ -764,41 +768,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-
+    # Daily briefing shortcut
     if text == "daily briefing":
         await send_daily_briefing(context.application)
         return
 
-    
+    # Persist semantic memory for inputs
+    save_semantic_memory(user_message)
 
-    if text == "overspending":
-        insights = get_overspending_insights()
-        await update.message.reply_text(insights, reply_markup=get_main_menu())
+    # "Remember ..." handling
+    remember_text = detect_remember_command(user_message)
+    if remember_text:
+        saved = save_personal_memory(remember_text)
+        reply = f"Remembered: {remember_text}" if saved else "Memory save failed."
+        save_to_supabase(user_message, reply)
+        await update.message.reply_text(reply)
         return
 
-   
-    
+    # Short command handlers
+    if text in ["where am i overspending", "overspending"]:
+        raw = get_overspending_insights()
+        formatted = format_with_claude("Overspending Analysis", raw)
+        await update.message.reply_text(formatted, reply_markup=get_main_menu())
+        return
+
     if text == "gmail summary":
         raw = get_gmail_summary()
         formatted = format_with_claude("Gmail Summary", raw)
         await update.message.reply_text(formatted, reply_markup=get_main_menu())
         return
 
-    
-    
     if text == "calendar summary":
         raw = get_calendar_summary()
         formatted = format_with_claude("Calendar Summary", raw)
         await update.message.reply_text(formatted, reply_markup=get_main_menu())
         return
 
-
-        if text == "asana tasks":
-            raw = get_asana_tasks()
-            formatted = format_with_claude("Asana Tasks", raw)
-            await update.message.reply_text(formatted, reply_markup=get_main_menu())
-            return
-
+    if text == "asana tasks":
+        raw = get_asana_tasks()
+        formatted = format_with_claude("Asana Tasks", raw)
+        await update.message.reply_text(formatted, reply_markup=get_main_menu())
+        return
 
     if text == "create calendar event":
         await update.message.reply_text(
@@ -807,58 +817,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.chat.send_action("typing")
-
-    save_semantic_memory(user_message)
-
-    remember_text = detect_remember_command(user_message)
-
-    if remember_text:
-        saved = save_personal_memory(remember_text)
-
-        reply = f"Remembered: {remember_text}" if saved else "Memory save failed."
-
-        save_to_supabase(user_message, reply)
-        await update.message.reply_text(reply)
-        return
-
-    if text == "system status":
-        status = get_system_status()
-        await update.message.reply_text(status)
-        return
-
-    if text == "finance report":
-        report = get_monthly_spending_breakdown()
-        await update.message.reply_text(report)
-        return
-
-
-
-    if text.startswith("create calendar event ") or text.startswith("add calendar event ") or text.startswith("schedule event "):
+    # Create calendar event from full command
+    if (
+        text.startswith("create calendar event ")
+        or text.startswith("add calendar event ")
+        or text.startswith("schedule event ")
+        or text.startswith("schedule ")
+    ):
         result = create_calendar_event_from_text(user_message)
         save_to_supabase(user_message, result)
         await update.message.reply_text(result)
         return
 
+    # Create Asana task
     if text.startswith("create task ") or text.startswith("add task "):
-        task_name = user_message.replace("create task", "").replace("add task", "").strip()
-
+        task_name = re.sub(r'^(create task|add task)\s+', '', user_message, flags=re.IGNORECASE).strip()
         if not task_name:
             await update.message.reply_text("Please provide a task name.")
             return
-
         result = create_asana_task(task_name)
         save_to_supabase(user_message, result)
         await update.message.reply_text(result)
         return
 
-    finance_tx = classify_finance_message(user_message)
+    # System status
+    if text == "system status":
+        status = get_system_status()
+        await update.message.reply_text(status)
+        return
 
+    # Finance report
+    if text == "finance report":
+        raw = get_monthly_spending_breakdown()
+        formatted = format_with_claude("Finance Report", raw)
+        await update.message.reply_text(formatted, reply_markup=get_main_menu())
+        return
+
+    # Finance classification / save
+    finance_tx = classify_finance_message(user_message)
     if finance_tx:
         save_finance_transaction(finance_tx)
 
+    # Semantic search & contexts
     semantic_results = search_semantic_memory(user_message)
-
     semantic_context = f"""
 Relevant semantic memories:
 {json.dumps(semantic_results, indent=2)}
@@ -892,30 +893,15 @@ Personal memories:
     if "asana" in text or "task" in text or "project" in text:
         asana_context = f"\n\nAsana live data:\n{get_asana_tasks()}"
 
-    if "daily briefing" in text or "morning briefing" in text:
-        await send_daily_briefing(context.application)
-        return
-
+    # Recent conversation history
     recent_memories = get_recent_memories()
-
     conversation_history = []
-
     for memory in reversed(recent_memories):
-        conversation_history.append({
-            "role": "user",
-            "content": memory["user_message"]
-        })
+        conversation_history.append({"role": "user", "content": memory["user_message"]})
+        conversation_history.append({"role": "assistant", "content": memory["assistant_response"]})
+    conversation_history.append({"role": "user", "content": user_message})
 
-        conversation_history.append({
-            "role": "assistant",
-            "content": memory["assistant_response"]
-        })
-
-    conversation_history.append({
-        "role": "user",
-        "content": user_message
-    })
-
+    # Query Claude
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1200,
@@ -933,9 +919,7 @@ Personal memories:
     )
 
     reply = response.content[0].text
-
     save_to_supabase(user_message, reply)
-
     await update.message.reply_text(reply)
 
 
