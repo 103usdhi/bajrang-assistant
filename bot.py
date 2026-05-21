@@ -46,6 +46,8 @@ CRITICAL RULES:
 - Prioritize recent conversation first.
 - Use semantic memory, explicit memory, finance data, Gmail, Calendar, and Asana when available.
 - Never invent financial information.
+- Never claim that calendar events, Asana tasks, emails, or database writes were completed unless an actual API/database result confirms success.
+- If the user asks for an external action that is unsupported or unconfirmed, say that it was not completed and explain what is available.
 - Be direct, intelligent and helpful.
 """
 
@@ -74,7 +76,20 @@ CALENDAR_EVENT_PREFIXES = [
     "create calendar event",
     "add calendar event",
     "schedule event",
+    "create meeting",
+    "add meeting",
+    "schedule meeting",
+    "book meeting",
+    "create event",
+    "add event",
     "schedule"
+]
+
+ASANA_TASK_PREFIXES = [
+    "create task",
+    "add task",
+    "create asana task",
+    "add asana task"
 ]
 
 MENU_COMMANDS = {"menu", "start", "help"}
@@ -186,7 +201,14 @@ def save_personal_memory(memory_text):
             "is_active": True
         }
         result = requests.post(url, headers=supabase_headers, json=data)
-        return result.status_code in [200, 201, 204]
+        if result.status_code in [200, 201, 204]:
+            return True
+
+        log_system_error(
+            "save_personal_memory",
+            RuntimeError(f"Supabase returned {result.status_code}: {result.text}")
+        )
+        return False
     except Exception as e:
         log_system_error("save_personal_memory", e)
         return False
@@ -320,9 +342,18 @@ def save_finance_transaction(tx):
             "is_essential": tx["is_essential"],
             "confidence_score": 0.85
         }
-        requests.post(url, headers=supabase_headers, json=data)
+        result = requests.post(url, headers=supabase_headers, json=data)
+        if result.status_code in [200, 201, 204]:
+            return True
+
+        log_system_error(
+            "save_finance_transaction",
+            RuntimeError(f"Supabase returned {result.status_code}: {result.text}")
+        )
+        return False
     except Exception as e:
         log_system_error("save_finance_transaction", e)
+        return False
 
 
 def get_finance_summary():
@@ -819,28 +850,179 @@ def format_log_time(value):
         return str(value)
 
 
+def parse_log_datetime(value):
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def get_log_sort_timestamp(row):
+    logged_at = parse_log_datetime(row.get("timestamp"))
+
+    if not logged_at:
+        return 0
+
+    return logged_at.timestamp()
+
+
+def get_error_severity(row):
+    module = (row.get("module") or "").lower()
+    message = (row.get("error_message") or "").lower()
+    text = f"{module} {message}"
+
+    critical_keywords = [
+        "telegram_error_handler",
+        "permission denied",
+        "unauthorized",
+        "invalid token",
+        "connection refused",
+        "timeout",
+        "database",
+        "supabase"
+    ]
+    warning_keywords = [
+        "missing",
+        "disabled",
+        "failed",
+        "could not fetch",
+        "not found",
+        "rate limit"
+    ]
+
+    if any(keyword in text for keyword in critical_keywords):
+        return "critical"
+
+    if any(keyword in text for keyword in warning_keywords):
+        return "warning"
+
+    return "notice"
+
+
+def get_severity_label(severity):
+    labels = {
+        "critical": f"{ICON_RED} Critical",
+        "warning": f"{ICON_WARNING} Warning",
+        "notice": f"{ICON_YELLOW} Notice"
+    }
+    return labels.get(severity, f"{ICON_YELLOW} Notice")
+
+
+def group_errors_by_severity(rows):
+    grouped = {
+        "critical": [],
+        "warning": [],
+        "notice": []
+    }
+
+    for row in rows:
+        grouped[get_error_severity(row)].append(row)
+
+    return grouped
+
+
+def get_module_counts(rows):
+    counts = {}
+
+    for row in rows:
+        module = row.get("module") or "unknown"
+        counts[module] = counts.get(module, 0) + 1
+
+    return sorted(counts.items(), key=lambda item: item[1], reverse=True)
+
+
+def get_incident_summary(rows, grouped):
+    if not rows:
+        return "No incidents found in the latest system_logs entries."
+
+    critical_count = len(grouped["critical"])
+    warning_count = len(grouped["warning"])
+
+    if critical_count:
+        return f"{critical_count} critical incident(s) need attention."
+
+    if warning_count:
+        return f"{warning_count} warning(s) found; the bot is mostly operational."
+
+    return "Only low-priority notices found."
+
+
+def format_module_summary(rows):
+    module_counts = get_module_counts(rows)
+
+    if not module_counts:
+        return "Modules: none"
+
+    summary = ", ".join(
+        f"{module} ({count})"
+        for module, count in module_counts[:4]
+    )
+
+    if len(module_counts) > 4:
+        summary += f", +{len(module_counts) - 4} more"
+
+    return f"Modules: {summary}"
+
+
+def format_incident_entry(row):
+    module = row.get("module") or "unknown"
+    timestamp = format_log_time(row.get("timestamp"))
+    error_message = truncate_text(row.get("error_message"), max_length=180)
+
+    return [
+        f"{ICON_MAGNIFIER} {module}",
+        f"Time: {timestamp}",
+        f"Message: {error_message}"
+    ]
+
+
 def format_system_errors(rows):
     if not rows:
-        return f"{ICON_CLIPBOARD} Recent System Errors\n\nNo errors logged yet."
+        return (
+            f"{ICON_CLIPBOARD} Incident Dashboard\n\n"
+            f"{ICON_CHECK} Summary\n"
+            "No errors logged yet."
+        )
+
+    rows = sorted(
+        rows,
+        key=get_log_sort_timestamp,
+        reverse=True
+    )
+    grouped = group_errors_by_severity(rows)
+    latest_time = format_log_time(rows[0].get("timestamp"))
+    oldest_time = format_log_time(rows[-1].get("timestamp"))
 
     lines = [
-        f"{ICON_CLIPBOARD} Recent System Errors",
+        f"{ICON_CLIPBOARD} Incident Dashboard",
         "",
-        f"Showing latest {len(rows)} entries from system_logs.",
+        f"Health Summary: {get_incident_summary(rows, grouped)}",
+        f"Latest Incident: {latest_time}",
+        f"Window Start: {oldest_time}",
+        f"Entries Reviewed: {len(rows)}",
+        format_module_summary(rows),
         ""
     ]
 
-    for index, row in enumerate(rows, start=1):
-        module = row.get("module") or "unknown"
-        timestamp = format_log_time(row.get("timestamp"))
-        error_message = truncate_text(row.get("error_message"))
+    for severity in ["critical", "warning", "notice"]:
+        severity_rows = grouped[severity]
+
+        if not severity_rows:
+            continue
 
         lines.extend([
-            f"{index}. {ICON_WARNING} {module}",
-            f"Time: {timestamp}",
-            f"Error: {error_message}",
+            f"{get_severity_label(severity)} ({len(severity_rows)})",
             ""
         ])
+
+        for index, row in enumerate(severity_rows, start=1):
+            entry_lines = format_incident_entry(row)
+            entry_lines[0] = f"{index}. {entry_lines[0]}"
+            lines.extend(entry_lines)
+            lines.append("")
 
     return "\n".join(lines).strip()
 
@@ -1058,7 +1240,93 @@ def get_formatted_command(text):
 
 
 def is_calendar_event_request(text):
-    return any(text.startswith(f"{prefix} ") for prefix in CALENDAR_EVENT_PREFIXES)
+    if any(text.startswith(f"{prefix} ") for prefix in CALENDAR_EVENT_PREFIXES):
+        return True
+
+    action_words = ("create", "add", "schedule", "book")
+    calendar_words = ("calendar", "event", "meeting", "appointment")
+    return text.startswith(action_words) and any(word in text for word in calendar_words)
+
+
+def is_email_action_request(text):
+    action_words = ("send", "reply", "forward", "draft")
+    email_words = ("email", "gmail", "mail")
+    return text.startswith(action_words) and any(word in text for word in email_words)
+
+
+def is_unsupported_external_action_request(text):
+    unsupported_actions = (
+        "delete",
+        "remove",
+        "cancel",
+        "update",
+        "edit",
+        "reschedule",
+        "complete",
+        "mark",
+        "write",
+        "store"
+    )
+    external_targets = (
+        "calendar",
+        "event",
+        "meeting",
+        "asana",
+        "task",
+        "email",
+        "gmail",
+        "mail",
+        "database",
+        "supabase",
+        "table",
+        "record"
+    )
+
+    return text.startswith(unsupported_actions) and any(target in text for target in external_targets)
+
+
+def extract_task_name(message):
+    for prefix in ASANA_TASK_PREFIXES:
+        pattern = rf"^{re.escape(prefix)}\s+"
+        task_name = re.sub(pattern, "", message, flags=re.IGNORECASE).strip()
+
+        if task_name != message.strip():
+            return task_name
+
+    return None
+
+
+def format_finance_confirmation(tx, saved):
+    amount = f"{tx['amount']:.2f}"
+    category = tx["category"]
+    transaction_type = tx["transaction_type"].replace("_", " ")
+
+    if saved:
+        return (
+            "Confirmed: I logged this finance transaction.\n"
+            f"Type: {transaction_type}\n"
+            f"Amount: EUR {amount}\n"
+            f"Category: {category}"
+        )
+
+    return (
+        "I could not confirm that this finance transaction was saved.\n"
+        "No completion has been recorded. Please try again or check Supabase/system logs."
+    )
+
+
+def get_safe_action_result(result, success_prefix, failure_prefix):
+    if result.startswith(success_prefix):
+        return f"Confirmed: {result}"
+
+    return f"{failure_prefix}\n{result}"
+
+
+def get_unsupported_action_reply():
+    return (
+        "I did not complete that external action.\n"
+        "Only these write actions are currently connected to real APIs: create calendar events, create Asana tasks, save memories, and log finance transactions."
+    )
 
 
 def build_live_context(text):
@@ -1101,7 +1369,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_text = detect_remember_command(user_message)
     if remember_text:
         saved = save_personal_memory(remember_text)
-        reply = f"Remembered: {remember_text}" if saved else "Memory save failed."
+        reply = (
+            f"Confirmed: I saved this memory.\nMemory: {remember_text}"
+            if saved
+            else "I could not confirm that this memory was saved. Please try again or check system logs."
+        )
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply)
         return
@@ -1121,22 +1393,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Create calendar event from full command
-    if is_calendar_event_request(text):
-        result = create_calendar_event_from_text(user_message)
-        save_to_supabase(user_message, result)
-        await update.message.reply_text(result)
-        return
-
     # Create Asana task
-    if text.startswith("create task ") or text.startswith("add task "):
-        task_name = re.sub(r'^(create task|add task)\s+', '', user_message, flags=re.IGNORECASE).strip()
+    task_name = extract_task_name(user_message)
+    if task_name is not None:
         if not task_name:
             await update.message.reply_text("Please provide a task name.")
             return
         result = create_asana_task(task_name)
-        save_to_supabase(user_message, result)
-        await update.message.reply_text(result)
+        reply = get_safe_action_result(
+            result,
+            "Asana task created:",
+            "I could not confirm that an Asana task was created."
+        )
+        save_to_supabase(user_message, reply)
+        await update.message.reply_text(reply)
+        return
+
+    # Create calendar event from full command
+    if is_calendar_event_request(text):
+        result = create_calendar_event_from_text(user_message)
+        reply = get_safe_action_result(
+            result,
+            "Calendar event created:",
+            "I could not confirm that a calendar event was created."
+        )
+        save_to_supabase(user_message, reply)
+        await update.message.reply_text(reply)
         return
 
     # System status
@@ -1150,10 +1432,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(errors, reply_markup=get_main_menu())
         return
 
+    if is_email_action_request(text):
+        reply = (
+            "I did not send, reply to, forward, or draft any email.\n"
+            "This bot can read Gmail summaries, but email-writing actions are not connected to a real Gmail send/draft API yet."
+        )
+        save_to_supabase(user_message, reply)
+        await update.message.reply_text(reply)
+        return
+
     # Finance classification / save
     finance_tx = classify_finance_message(user_message)
     if finance_tx:
-        save_finance_transaction(finance_tx)
+        saved = save_finance_transaction(finance_tx)
+        reply = format_finance_confirmation(finance_tx, saved)
+        save_to_supabase(user_message, reply)
+        await update.message.reply_text(reply)
+        return
+
+    if is_unsupported_external_action_request(text):
+        reply = get_unsupported_action_reply()
+        save_to_supabase(user_message, reply)
+        await update.message.reply_text(reply)
+        return
 
     # Semantic search & contexts
     semantic_results = search_semantic_memory(user_message)
