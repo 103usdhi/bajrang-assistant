@@ -3,7 +3,9 @@ import re
 import json
 import logging
 import requests
+import base64
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -29,6 +31,7 @@ GOOGLE_TOKEN_JSON = os.getenv("GOOGLE_TOKEN_JSON")
 
 ALLOWED_USER_ID = 8106199737
 TIMEZONE_NAME = "Europe/Berlin"
+GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -93,6 +96,10 @@ ASANA_TASK_PREFIXES = [
 ]
 
 WAITING_FOR_CALENDAR_EVENT = "waiting_for_calendar_event"
+WAITING_FOR_EMAIL_TO = "waiting_for_email_to"
+WAITING_FOR_EMAIL_SUBJECT = "waiting_for_email_subject"
+WAITING_FOR_EMAIL_BODY = "waiting_for_email_body"
+EMAIL_DRAFT_STATE = "email_draft"
 
 MENU_COMMANDS = {"menu", "start", "help"}
 FINANCE_CONTEXT_KEYWORDS = [
@@ -467,12 +474,44 @@ def get_overspending_insights():
         return f"Overspending analysis failed: {str(e)}"
 
 
-def get_google_credentials():
+def get_google_token_scopes(token_data):
+    scopes = token_data.get("scopes") or token_data.get("scope") or []
+
+    if isinstance(scopes, str):
+        scopes = re.split(r"[\s,]+", scopes.strip())
+
+    return {scope for scope in scopes if scope}
+
+
+def get_google_credentials(required_scopes=None):
+    required_scopes = required_scopes or []
+
     if not GOOGLE_TOKEN_JSON:
+        if required_scopes:
+            log_system_error(
+                "get_google_credentials",
+                RuntimeError("Google token missing for required scopes: " + ", ".join(required_scopes))
+            )
         return None
 
     try:
         token_data = json.loads(GOOGLE_TOKEN_JSON)
+
+        if required_scopes:
+            available_scopes = get_google_token_scopes(token_data)
+            missing_scopes = [
+                scope
+                for scope in required_scopes
+                if scope not in available_scopes
+            ]
+
+            if missing_scopes:
+                log_system_error(
+                    "get_google_credentials",
+                    RuntimeError("Missing Google scopes: " + ", ".join(missing_scopes))
+                )
+                return None
+
         return Credentials.from_authorized_user_info(token_data)
     except Exception as e:
         log_system_error("get_google_credentials", e)
@@ -522,6 +561,53 @@ def get_gmail_summary():
     except Exception as e:
         log_system_error("get_gmail_summary", e)
         return f"Gmail fetch failed: {str(e)}"
+
+
+def create_gmail_draft(to_email, subject, body):
+    try:
+        creds = get_google_credentials(required_scopes=[GMAIL_COMPOSE_SCOPE])
+
+        if not creds:
+            log_system_error(
+                "create_gmail_draft",
+                RuntimeError(f"Missing Google token or required scope {GMAIL_COMPOSE_SCOPE}.")
+            )
+            return (
+                "Gmail draft creation failed: missing Google token or required "
+                f"scope {GMAIL_COMPOSE_SCOPE}."
+            )
+
+        message = EmailMessage()
+        message["To"] = to_email
+        message["Subject"] = subject
+        message.set_content(body)
+
+        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        draft_body = {
+            "message": {
+                "raw": encoded_message
+            }
+        }
+
+        service = build("gmail", "v1", credentials=creds)
+        draft = service.users().drafts().create(
+            userId="me",
+            body=draft_body
+        ).execute()
+
+        draft_id = draft.get("id")
+
+        if draft_id:
+            return f"Gmail draft created: {subject} (draft id: {draft_id})"
+
+        log_system_error(
+            "create_gmail_draft",
+            RuntimeError("Gmail drafts.create returned no draft id.")
+        )
+        return "Gmail draft creation failed: Gmail did not return a draft id."
+    except Exception as e:
+        log_system_error("create_gmail_draft", e)
+        return f"Gmail draft creation failed: {str(e)}"
 
 
 def get_calendar_summary():
@@ -1181,7 +1267,8 @@ def get_main_menu():
         ["Daily Briefing"],
         ["Finance Report", "Overspending"],
         ["Gmail Summary", "Calendar Summary"],
-        ["Asana Tasks", "Create Calendar Event"]
+        ["Asana Tasks", "Create Calendar Event"],
+        ["Draft Email"]
     ]
 
     return ReplyKeyboardMarkup(
@@ -1251,9 +1338,13 @@ def is_calendar_event_request(text):
 
 
 def is_email_action_request(text):
-    action_words = ("send", "reply", "forward", "draft")
+    action_words = ("send", "reply", "forward")
     email_words = ("email", "gmail", "mail")
     return text.startswith(action_words) and any(word in text for word in email_words)
+
+
+def is_draft_email_request(text):
+    return text in {"draft email", "create email draft", "draft gmail", "create gmail draft"}
 
 
 def is_unsupported_external_action_request(text):
@@ -1333,10 +1424,65 @@ def create_calendar_event_reply(message):
     )
 
 
+def create_gmail_draft_reply(to_email, subject, body):
+    result = create_gmail_draft(to_email, subject, body)
+    return get_safe_action_result(
+        result,
+        "Gmail draft created:",
+        "I could not confirm that a Gmail draft was created."
+    )
+
+
+def clear_email_draft_state(context):
+    context.user_data.pop(WAITING_FOR_EMAIL_TO, None)
+    context.user_data.pop(WAITING_FOR_EMAIL_SUBJECT, None)
+    context.user_data.pop(WAITING_FOR_EMAIL_BODY, None)
+    context.user_data.pop(EMAIL_DRAFT_STATE, None)
+
+
+async def handle_email_draft_flow(update, context, user_message):
+    if context.user_data.get(WAITING_FOR_EMAIL_TO):
+        context.user_data.pop(WAITING_FOR_EMAIL_TO, None)
+        context.user_data[WAITING_FOR_EMAIL_SUBJECT] = True
+        context.user_data[EMAIL_DRAFT_STATE] = {"to": user_message.strip()}
+        await update.message.reply_text("What subject should I use?")
+        return True
+
+    if context.user_data.get(WAITING_FOR_EMAIL_SUBJECT):
+        context.user_data.pop(WAITING_FOR_EMAIL_SUBJECT, None)
+        context.user_data[WAITING_FOR_EMAIL_BODY] = True
+        draft = context.user_data.setdefault(EMAIL_DRAFT_STATE, {})
+        draft["subject"] = user_message.strip()
+        await update.message.reply_text("What should the email say?")
+        return True
+
+    if context.user_data.get(WAITING_FOR_EMAIL_BODY):
+        context.user_data.pop(WAITING_FOR_EMAIL_BODY, None)
+        draft = context.user_data.get(EMAIL_DRAFT_STATE, {})
+        to_email = draft.get("to", "")
+        subject = draft.get("subject", "")
+        body = user_message.strip()
+        clear_email_draft_state(context)
+
+        if not to_email or not subject or not body:
+            reply = (
+                "I could not create the Gmail draft because recipient, subject, or body was missing.\n"
+                "No draft was created."
+            )
+        else:
+            reply = create_gmail_draft_reply(to_email, subject, body)
+
+        save_to_supabase("Draft Email", reply)
+        await update.message.reply_text(reply, reply_markup=get_main_menu())
+        return True
+
+    return False
+
+
 def get_unsupported_action_reply():
     return (
         "I did not complete that external action.\n"
-        "Only these write actions are currently connected to real APIs: create calendar events, create Asana tasks, save memories, and log finance transactions."
+        "Only these write actions are currently connected to real APIs: create calendar events, create Gmail drafts, create Asana tasks, save memories, and log finance transactions."
     )
 
 
@@ -1365,6 +1511,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = create_calendar_event_reply(user_message)
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply, reply_markup=get_main_menu())
+        return
+
+    if await handle_email_draft_flow(update, context, user_message):
         return
 
     # Simple menu/help
@@ -1411,6 +1560,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if is_draft_email_request(text):
+        clear_email_draft_state(context)
+        context.user_data[WAITING_FOR_EMAIL_TO] = True
+        await update.message.reply_text(
+            "Who should the draft email be addressed to?"
+        )
+        return
+
     # Create Asana task
     task_name = extract_task_name(user_message)
     if task_name is not None:
@@ -1447,8 +1604,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_email_action_request(text):
         reply = (
-            "I did not send, reply to, forward, or draft any email.\n"
-            "This bot can read Gmail summaries, but email-writing actions are not connected to a real Gmail send/draft API yet."
+            "I did not send, reply to, or forward any email.\n"
+            "Email sending is disabled. I can create Gmail drafts through the Draft Email button."
         )
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply)
