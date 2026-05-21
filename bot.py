@@ -92,6 +92,8 @@ ASANA_TASK_PREFIXES = [
     "add asana task"
 ]
 
+WAITING_FOR_CALENDAR_EVENT = "waiting_for_calendar_event"
+
 MENU_COMMANDS = {"menu", "start", "help"}
 FINANCE_CONTEXT_KEYWORDS = [
     "finance",
@@ -1322,6 +1324,15 @@ def get_safe_action_result(result, success_prefix, failure_prefix):
     return f"{failure_prefix}\n{result}"
 
 
+def create_calendar_event_reply(message):
+    result = create_calendar_event_from_text(message)
+    return get_safe_action_result(
+        result,
+        "Calendar event created:",
+        "I could not confirm that a calendar event was created."
+    )
+
+
 def get_unsupported_action_reply():
     return (
         "I did not complete that external action.\n"
@@ -1348,6 +1359,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_message = update.message.text
     text = user_message.lower().strip()
+
+    if context.user_data.get(WAITING_FOR_CALENDAR_EVENT):
+        context.user_data.pop(WAITING_FOR_CALENDAR_EVENT, None)
+        reply = create_calendar_event_reply(user_message)
+        save_to_supabase(user_message, reply)
+        await update.message.reply_text(reply, reply_markup=get_main_menu())
+        return
 
     # Simple menu/help
     if text in MENU_COMMANDS:
@@ -1387,9 +1405,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "create calendar event":
+        context.user_data[WAITING_FOR_CALENDAR_EVENT] = True
         await update.message.reply_text(
-            "Send it like this:\ncreate calendar event Dentist tomorrow 15:00",
-            reply_markup=get_main_menu()
+            "What would you like to schedule?\nExample: Dentist tomorrow 15:00"
         )
         return
 
@@ -1411,12 +1429,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Create calendar event from full command
     if is_calendar_event_request(text):
-        result = create_calendar_event_from_text(user_message)
-        reply = get_safe_action_result(
-            result,
-            "Calendar event created:",
-            "I could not confirm that a calendar event was created."
-        )
+        reply = create_calendar_event_reply(user_message)
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply)
         return
