@@ -725,6 +725,31 @@ def get_main_menu():
     )
 
 
+def format_with_claude(title, raw_data):
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=700,
+            system="Format raw assistant data into a clean, readable Telegram message. Use short headings, bullets or tables. Do not show JSON.",
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"""
+Title: {title}
+
+Raw data:
+{raw_data}
+"""
+                }
+            ]
+        )
+
+        return response.content[0].text
+
+    except Exception as e:
+        return f"{title} failed to format: {str(e)}"
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER_ID:
         return
@@ -739,36 +764,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if text == "system status":
-        status = get_system_status()
-        await update.message.reply_text(status, reply_markup=get_main_menu())
-        return
 
     if text == "daily briefing":
         await send_daily_briefing(context.application)
         return
 
-    if text == "finance report":
-        report = get_monthly_spending_breakdown()
-        await update.message.reply_text(report, reply_markup=get_main_menu())
-        return
+    
 
     if text == "overspending":
         insights = get_overspending_insights()
         await update.message.reply_text(insights, reply_markup=get_main_menu())
         return
 
+   
+    
     if text == "gmail summary":
-        await update.message.reply_text(get_gmail_summary(), reply_markup=get_main_menu())
+        raw = get_gmail_summary()
+        formatted = format_with_claude("Gmail Summary", raw)
+        await update.message.reply_text(formatted, reply_markup=get_main_menu())
         return
 
+    
+    
     if text == "calendar summary":
-        await update.message.reply_text(get_calendar_summary(), reply_markup=get_main_menu())
+        raw = get_calendar_summary()
+        formatted = format_with_claude("Calendar Summary", raw)
+        await update.message.reply_text(formatted, reply_markup=get_main_menu())
         return
+
 
     if text == "asana tasks":
-        await update.message.reply_text(get_asana_tasks(), reply_markup=get_main_menu())
-        return
+    raw = get_asana_tasks()
+    formatted = format_with_claude("Asana Tasks", raw)
+    await update.message.reply_text(formatted, reply_markup=get_main_menu())
+    return
+
 
     if text == "create calendar event":
         await update.message.reply_text(
@@ -802,10 +832,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(report)
         return
 
-    if text == "where am i overspending":
-        insights = get_overspending_insights()
-        await update.message.reply_text(insights)
-        return
+
 
     if text.startswith("create calendar event ") or text.startswith("add calendar event ") or text.startswith("schedule event "):
         result = create_calendar_event_from_text(user_message)
