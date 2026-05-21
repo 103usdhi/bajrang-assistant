@@ -90,6 +90,20 @@ FINANCE_CONTEXT_KEYWORDS = [
     "budget"
 ]
 
+ICON_GREEN = "\U0001f7e2"
+ICON_YELLOW = "\U0001f7e1"
+ICON_RED = "\U0001f534"
+ICON_WHITE = "\u26aa"
+ICON_COMPASS = "\U0001f9ed"
+ICON_DATABASE = "\U0001f5c4\ufe0f"
+ICON_BRAIN = "\U0001f9e0"
+ICON_PLUG = "\U0001f50c"
+ICON_CHART = "\U0001f4ca"
+ICON_WARNING = "\u26a0\ufe0f"
+ICON_CHECK = "\u2705"
+ICON_CLIPBOARD = "\U0001f4cb"
+ICON_MAGNIFIER = "\U0001f50e"
+
 supabase_headers = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -680,6 +694,179 @@ def create_asana_task(task_name):
         return f"Asana error: {str(e)}"
 
 
+def get_health_indicator(value):
+    if value == "connected":
+        return f"{ICON_GREEN} Online"
+
+    if value == "disabled":
+        return f"{ICON_WHITE} Disabled"
+
+    if value == "failed":
+        return f"{ICON_RED} Failed"
+
+    return f"{ICON_YELLOW} Unknown"
+
+
+def format_record_count(value):
+    if isinstance(value, int):
+        return f"{value:,} records"
+
+    if value == "failed":
+        return f"{ICON_RED} Unavailable"
+
+    return f"{ICON_YELLOW} Unknown"
+
+
+def get_overall_health(report):
+    service_keys = [
+        "supabase",
+        "gmail",
+        "calendar",
+        "asana",
+        "openai_embeddings",
+        "claude"
+    ]
+    services = [report.get(key) for key in service_keys]
+
+    if any(status == "failed" for status in services):
+        return f"{ICON_RED} Attention needed"
+
+    if any(status == "disabled" for status in services):
+        return f"{ICON_YELLOW} Partially operational"
+
+    return f"{ICON_GREEN} All systems operational"
+
+
+def format_system_status_dashboard(report):
+    data_labels = {
+        "events_log_count": "Conversation logs",
+        "personal_memory_count": "Personal memories",
+        "semantic_memory_count": "Semantic memories",
+        "finance_transactions_count": "Finance transactions"
+    }
+
+    lines = [
+        f"{ICON_COMPASS} Bajrang System Dashboard",
+        "",
+        f"Overall Health: {get_overall_health(report)}",
+        f"Last Check: {report['current_time']}",
+        "",
+        f"{ICON_DATABASE} Core Infrastructure",
+        f"Supabase: {get_health_indicator(report.get('supabase'))}",
+        "",
+        f"{ICON_BRAIN} Intelligence",
+        f"Claude: {get_health_indicator(report.get('claude'))}",
+        f"OpenAI Embeddings: {get_health_indicator(report.get('openai_embeddings'))}",
+        "",
+        f"{ICON_PLUG} Connected Apps",
+        f"Gmail: {get_health_indicator(report.get('gmail'))}",
+        f"Calendar: {get_health_indicator(report.get('calendar'))}",
+        f"Asana: {get_health_indicator(report.get('asana'))}",
+        "",
+        f"{ICON_CHART} Data Stores"
+    ]
+
+    for key, label in data_labels.items():
+        lines.append(f"{label}: {format_record_count(report.get(key))}")
+
+    failed_services = [
+        label
+        for key, label in [
+            ("supabase", "Supabase"),
+            ("gmail", "Gmail"),
+            ("calendar", "Calendar"),
+            ("asana", "Asana"),
+            ("openai_embeddings", "OpenAI Embeddings"),
+            ("claude", "Claude")
+        ]
+        if report.get(key) == "failed"
+    ]
+
+    if failed_services:
+        lines.extend([
+            "",
+            f"{ICON_WARNING} Attention",
+            "Check: " + ", ".join(failed_services)
+        ])
+    else:
+        lines.extend([
+            "",
+            f"{ICON_CHECK} Summary",
+            "No active failures detected."
+        ])
+
+    return "\n".join(lines)
+
+
+def truncate_text(value, max_length=260):
+    value = str(value or "").replace("\n", " ").strip()
+
+    if len(value) <= max_length:
+        return value
+
+    return value[: max_length - 3].rstrip() + "..."
+
+
+def format_log_time(value):
+    if not value:
+        return "Unknown time"
+
+    try:
+        clean_value = value.replace("Z", "+00:00")
+        logged_at = datetime.fromisoformat(clean_value)
+        return logged_at.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(value)
+
+
+def format_system_errors(rows):
+    if not rows:
+        return f"{ICON_CLIPBOARD} Recent System Errors\n\nNo errors logged yet."
+
+    lines = [
+        f"{ICON_CLIPBOARD} Recent System Errors",
+        "",
+        f"Showing latest {len(rows)} entries from system_logs.",
+        ""
+    ]
+
+    for index, row in enumerate(rows, start=1):
+        module = row.get("module") or "unknown"
+        timestamp = format_log_time(row.get("timestamp"))
+        error_message = truncate_text(row.get("error_message"))
+
+        lines.extend([
+            f"{index}. {ICON_WARNING} {module}",
+            f"Time: {timestamp}",
+            f"Error: {error_message}",
+            ""
+        ])
+
+    return "\n".join(lines).strip()
+
+
+def get_recent_system_errors(limit=10):
+    try:
+        url = (
+            f"{SUPABASE_URL}/rest/v1/system_logs"
+            f"?select=timestamp,module,error_message"
+            f"&order=timestamp.desc"
+            f"&limit={limit}"
+        )
+        result = requests.get(url, headers=supabase_headers)
+
+        if result.status_code != 200:
+            return (
+                f"{ICON_CLIPBOARD} Recent System Errors\n\n"
+                f"Could not fetch logs. Supabase returned {result.status_code}."
+            )
+
+        return format_system_errors(result.json())
+    except Exception as e:
+        log_system_error("get_recent_system_errors", e)
+        return f"{ICON_CLIPBOARD} Recent System Errors\n\nCould not fetch logs: {str(e)}"
+
+
 def get_system_status():
     report = {}
     report["current_time"] = get_current_datetime()
@@ -747,7 +934,7 @@ def get_system_status():
         log_system_error("get_system_status.claude", e)
         report["claude"] = "failed"
 
-    return json.dumps(report, indent=2)
+    return format_system_status_dashboard(report)
 
 
 async def send_daily_briefing(app):
@@ -806,7 +993,8 @@ Output:
 
 def get_main_menu():
     keyboard = [
-        ["System Status", "Daily Briefing"],
+        ["System Status", "Show Errors"],
+        ["Daily Briefing"],
         ["Finance Report", "Overspending"],
         ["Gmail Summary", "Calendar Summary"],
         ["Asana Tasks", "Create Calendar Event"]
@@ -955,6 +1143,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "system status":
         status = get_system_status()
         await update.message.reply_text(status)
+        return
+
+    if text == "show errors":
+        errors = get_recent_system_errors()
+        await update.message.reply_text(errors, reply_markup=get_main_menu())
         return
 
     # Finance classification / save
