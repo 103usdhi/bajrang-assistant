@@ -1373,9 +1373,6 @@ def get_main_menu():
         ["Gmail Summary", "Calendar Summary"],
         ["Asana Tasks", "Create Calendar Event"],
         ["Draft Email"],
-        ["Add German Word", "Add Grammar Rule"],
-        ["Quiz Me", "A1 Practice"],
-        ["Correct My German"],
         ["German A1"]
     ]
 
