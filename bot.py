@@ -28,6 +28,7 @@ ASANA_TOKEN = os.getenv("ASANA_TOKEN")
 GOOGLE_TOKEN_JSON = os.getenv("GOOGLE_TOKEN_JSON")
 
 ALLOWED_USER_ID = 8106199737
+TIMEZONE_NAME = "Europe/Berlin"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -48,6 +49,47 @@ CRITICAL RULES:
 - Be direct, intelligent and helpful.
 """
 
+FINANCE_CATEGORY_RULES = {
+    "salary": ("salary", None, True),
+    "rent": ("rent", "housing", True),
+    "rewe": ("groceries", "food", True),
+    "aldi": ("groceries", "food", True),
+    "lidl": ("groceries", "food", True),
+    "edeka": ("groceries", "food", True),
+    "pizza": ("restaurant", "food", False),
+    "burger": ("restaurant", "food", False),
+    "coffee": ("coffee", "food", False),
+    "train": ("train", "transport", True),
+    "taxi": ("taxi", "transport", False),
+    "uber": ("uber", "transport", False),
+    "amazon": ("shopping", "lifestyle", False),
+    "netflix": ("subscriptions", "lifestyle", False),
+    "internet": ("internet", "housing", True),
+    "electricity": ("electricity", "housing", True),
+    "insurance": ("insurance", "health", True),
+    "medicine": ("medicine", "health", True)
+}
+
+CALENDAR_EVENT_PREFIXES = [
+    "create calendar event",
+    "add calendar event",
+    "schedule event",
+    "schedule"
+]
+
+MENU_COMMANDS = {"menu", "start", "help"}
+FINANCE_CONTEXT_KEYWORDS = [
+    "finance",
+    "money",
+    "balance",
+    "spend",
+    "spent",
+    "expense",
+    "salary",
+    "income",
+    "budget"
+]
+
 supabase_headers = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -56,44 +98,94 @@ supabase_headers = {
 }
 
 
+def get_timezone():
+    return ZoneInfo(TIMEZONE_NAME)
+
+
+def get_asana_headers(content_type=False):
+    headers = {"Authorization": f"Bearer {ASANA_TOKEN}"}
+
+    if content_type:
+        headers["Content-Type"] = "application/json"
+
+    return headers
+
+
 def get_current_datetime():
-    now = datetime.now(ZoneInfo("Europe/Berlin"))
+    now = datetime.now(get_timezone())
     return now.strftime("%A, %d %B %Y, %H:%M")
 
 
+def log_system_error(module, error):
+    if isinstance(error, BaseException):
+        exc_info = (type(error), error, error.__traceback__)
+        error_message = str(error)
+    else:
+        exc_info = None
+        error_message = str(error)
+
+    logging.error("%s failed: %s", module, error_message, exc_info=exc_info)
+
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/system_logs"
+        data = {
+            "timestamp": datetime.now(get_timezone()).isoformat(),
+            "module": module,
+            "error_message": error_message
+        }
+        requests.post(url, headers=supabase_headers, json=data, timeout=10)
+    except Exception as logging_error:
+        logging.error("system_logs write failed: %s", logging_error)
+
+
 def save_to_supabase(user_message, assistant_response):
-    url = f"{SUPABASE_URL}/rest/v1/events_log"
-    data = {
-        "user_message": user_message,
-        "assistant_response": assistant_response,
-        "source": "telegram"
-    }
-    requests.post(url, headers=supabase_headers, json=data)
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/events_log"
+        data = {
+            "user_message": user_message,
+            "assistant_response": assistant_response,
+            "source": "telegram"
+        }
+        requests.post(url, headers=supabase_headers, json=data)
+    except Exception as e:
+        log_system_error("save_to_supabase", e)
 
 
 def get_recent_memories():
-    url = f"{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=20"
-    result = requests.get(url, headers=supabase_headers)
-    return result.json() if result.status_code == 200 else []
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=20"
+        result = requests.get(url, headers=supabase_headers)
+        return result.json() if result.status_code == 200 else []
+    except Exception as e:
+        log_system_error("get_recent_memories", e)
+        return []
 
 
 def save_personal_memory(memory_text):
-    url = f"{SUPABASE_URL}/rest/v1/personal_memory"
-    data = {
-        "memory_text": memory_text,
-        "memory_type": "general",
-        "importance": "medium",
-        "source": "telegram",
-        "is_active": True
-    }
-    result = requests.post(url, headers=supabase_headers, json=data)
-    return result.status_code in [200, 201, 204]
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/personal_memory"
+        data = {
+            "memory_text": memory_text,
+            "memory_type": "general",
+            "importance": "medium",
+            "source": "telegram",
+            "is_active": True
+        }
+        result = requests.post(url, headers=supabase_headers, json=data)
+        return result.status_code in [200, 201, 204]
+    except Exception as e:
+        log_system_error("save_personal_memory", e)
+        return False
 
 
 def get_personal_memories():
-    url = f"{SUPABASE_URL}/rest/v1/personal_memory?select=memory_text&is_active=eq.true&order=created_at.desc&limit=50"
-    result = requests.get(url, headers=supabase_headers)
-    return result.json() if result.status_code == 200 else []
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/personal_memory?select=memory_text&is_active=eq.true&order=created_at.desc&limit=50"
+        result = requests.get(url, headers=supabase_headers)
+        return result.json() if result.status_code == 200 else []
+    except Exception as e:
+        log_system_error("get_personal_memories", e)
+        return []
 
 
 def detect_remember_command(message):
@@ -131,7 +223,7 @@ def save_semantic_memory(content):
         }
         requests.post(url, headers=supabase_headers, json=data)
     except Exception as e:
-        print("Semantic save failed:", str(e))
+        log_system_error("save_semantic_memory", e)
 
 
 def search_semantic_memory(query):
@@ -149,7 +241,7 @@ def search_semantic_memory(query):
         result = requests.post(url, headers=supabase_headers, json=data)
         return result.json() if result.status_code == 200 else []
     except Exception as e:
-        print("Semantic search failed:", str(e))
+        log_system_error("search_semantic_memory", e)
         return []
 
 
@@ -183,28 +275,7 @@ def classify_finance_message(message):
     subcategory = None
     is_essential = False
 
-    rules = {
-        "salary": ("salary", None, True),
-        "rent": ("rent", "housing", True),
-        "rewe": ("groceries", "food", True),
-        "aldi": ("groceries", "food", True),
-        "lidl": ("groceries", "food", True),
-        "edeka": ("groceries", "food", True),
-        "pizza": ("restaurant", "food", False),
-        "burger": ("restaurant", "food", False),
-        "coffee": ("coffee", "food", False),
-        "train": ("train", "transport", True),
-        "taxi": ("taxi", "transport", False),
-        "uber": ("uber", "transport", False),
-        "amazon": ("shopping", "lifestyle", False),
-        "netflix": ("subscriptions", "lifestyle", False),
-        "internet": ("internet", "housing", True),
-        "electricity": ("electricity", "housing", True),
-        "insurance": ("insurance", "health", True),
-        "medicine": ("medicine", "health", True)
-    }
-
-    for keyword, values in rules.items():
+    for keyword, values in FINANCE_CATEGORY_RULES.items():
         if keyword in text:
             category, subcategory, is_essential = values
             break
@@ -221,20 +292,23 @@ def classify_finance_message(message):
 
 
 def save_finance_transaction(tx):
-    url = f"{SUPABASE_URL}/rest/v1/finance_transactions"
-    data = {
-        "amount": tx["amount"],
-        "currency": "EUR",
-        "transaction_type": tx["transaction_type"],
-        "category": tx["category"],
-        "subcategory": tx["subcategory"],
-        "description": tx["description"],
-        "raw_user_message": tx["raw_user_message"],
-        "source": "telegram",
-        "is_essential": tx["is_essential"],
-        "confidence_score": 0.85
-    }
-    requests.post(url, headers=supabase_headers, json=data)
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/finance_transactions"
+        data = {
+            "amount": tx["amount"],
+            "currency": "EUR",
+            "transaction_type": tx["transaction_type"],
+            "category": tx["category"],
+            "subcategory": tx["subcategory"],
+            "description": tx["description"],
+            "raw_user_message": tx["raw_user_message"],
+            "source": "telegram",
+            "is_essential": tx["is_essential"],
+            "confidence_score": 0.85
+        }
+        requests.post(url, headers=supabase_headers, json=data)
+    except Exception as e:
+        log_system_error("save_finance_transaction", e)
 
 
 def get_finance_summary():
@@ -250,28 +324,46 @@ def get_finance_summary():
             "current_month_spending": monthly.json() if monthly.status_code == 200 else []
         }, indent=2)
     except Exception as e:
+        log_system_error("get_finance_summary", e)
         return f"Finance fetch failed: {str(e)}"
+
+
+def get_finance_transactions(select_columns):
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/finance_transactions?select={select_columns}"
+        result = requests.get(url, headers=supabase_headers)
+
+        if result.status_code != 200:
+            return None
+
+        return result.json()
+    except Exception as e:
+        log_system_error("get_finance_transactions", e)
+        return None
+
+
+def iter_expense_rows(rows):
+    for row in rows:
+        if row.get("transaction_type") != "expense":
+            continue
+
+        category = row.get("category") or "general"
+        amount = float(row.get("amount") or 0)
+
+        yield row, category, amount
 
 
 def get_monthly_spending_breakdown():
     try:
-        url = f"{SUPABASE_URL}/rest/v1/finance_transactions?select=amount,category,transaction_type"
-        result = requests.get(url, headers=supabase_headers)
+        rows = get_finance_transactions("amount,category,transaction_type")
 
-        if result.status_code != 200:
+        if rows is None:
             return "Finance analytics failed."
 
-        rows = result.json()
         category_totals = {}
         total_spending = 0
 
-        for row in rows:
-            if row.get("transaction_type") != "expense":
-                continue
-
-            category = row.get("category") or "general"
-            amount = float(row.get("amount") or 0)
-
+        for _, category, amount in iter_expense_rows(rows):
             total_spending += amount
             category_totals[category] = category_totals.get(category, 0) + amount
 
@@ -287,34 +379,27 @@ def get_monthly_spending_breakdown():
         }, indent=2)
 
     except Exception as e:
+        log_system_error("get_monthly_spending_breakdown", e)
         return f"Finance analytics failed: {str(e)}"
 
 
 def get_overspending_insights():
     try:
-        url = f"{SUPABASE_URL}/rest/v1/finance_transactions?select=amount,category,transaction_type,is_essential"
-        result = requests.get(url, headers=supabase_headers)
+        rows = get_finance_transactions("amount,category,transaction_type,is_essential")
 
-        if result.status_code != 200:
+        if rows is None:
             return "Overspending analysis failed."
 
-        rows = result.json()
         essential = 0
         non_essential = 0
         categories = {}
 
-        for row in rows:
-            if row.get("transaction_type") != "expense":
-                continue
-
-            amount = float(row.get("amount") or 0)
-
+        for row, category, amount in iter_expense_rows(rows):
             if row.get("is_essential"):
                 essential += amount
             else:
                 non_essential += amount
 
-            category = row.get("category") or "general"
             categories[category] = categories.get(category, 0) + amount
 
         biggest = sorted(
@@ -331,6 +416,7 @@ def get_overspending_insights():
         }, indent=2)
 
     except Exception as e:
+        log_system_error("get_overspending_insights", e)
         return f"Overspending analysis failed: {str(e)}"
 
 
@@ -338,8 +424,12 @@ def get_google_credentials():
     if not GOOGLE_TOKEN_JSON:
         return None
 
-    token_data = json.loads(GOOGLE_TOKEN_JSON)
-    return Credentials.from_authorized_user_info(token_data)
+    try:
+        token_data = json.loads(GOOGLE_TOKEN_JSON)
+        return Credentials.from_authorized_user_info(token_data)
+    except Exception as e:
+        log_system_error("get_google_credentials", e)
+        return None
 
 
 def get_gmail_summary():
@@ -383,6 +473,7 @@ def get_gmail_summary():
 
         return json.dumps(emails, indent=2)
     except Exception as e:
+        log_system_error("get_gmail_summary", e)
         return f"Gmail fetch failed: {str(e)}"
 
 
@@ -395,7 +486,7 @@ def get_calendar_summary():
 
         service = build("calendar", "v3", credentials=creds)
 
-        now = datetime.now(ZoneInfo("Europe/Berlin"))
+        now = datetime.now(get_timezone())
         end = now + timedelta(days=30)
 
         events_result = service.events().list(
@@ -409,27 +500,21 @@ def get_calendar_summary():
 
         return json.dumps(events_result.get("items", []), indent=2)
     except Exception as e:
+        log_system_error("get_calendar_summary", e)
         return f"Calendar fetch failed: {str(e)}"
 
 
 def parse_calendar_event_request(message):
     text = message.strip()
 
-    prefixes = [
-        "create calendar event",
-        "add calendar event",
-        "schedule event",
-        "schedule"
-    ]
-
     clean = text
 
-    for prefix in prefixes:
+    for prefix in CALENDAR_EVENT_PREFIXES:
         if clean.lower().startswith(prefix):
             clean = clean[len(prefix):].strip()
             break
 
-    timezone = ZoneInfo("Europe/Berlin")
+    timezone = get_timezone()
     now = datetime.now(timezone)
 
     event_date = now.date()
@@ -492,15 +577,15 @@ def create_calendar_event_from_text(message):
             "summary": title,
             "start": {
                 "dateTime": start_dt.isoformat(),
-                "timeZone": "Europe/Berlin"
+                "timeZone": TIMEZONE_NAME
             },
             "end": {
                 "dateTime": end_dt.isoformat(),
-                "timeZone": "Europe/Berlin"
+                "timeZone": TIMEZONE_NAME
             }
         }
 
-        created_event = service.events().insert(
+        service.events().insert(
             calendarId="primary",
             body=event_body
         ).execute()
@@ -508,21 +593,24 @@ def create_calendar_event_from_text(message):
         return f"Calendar event created: {title} at {start_dt.strftime('%Y-%m-%d %H:%M')}"
 
     except Exception as e:
+        log_system_error("create_calendar_event_from_text", e)
         return f"Calendar event creation failed: {str(e)}"
 
 
 def get_asana_user():
-    headers = {"Authorization": f"Bearer {ASANA_TOKEN}"}
+    try:
+        response = requests.get(
+            "https://app.asana.com/api/1.0/users/me",
+            headers=get_asana_headers()
+        )
 
-    response = requests.get(
-        "https://app.asana.com/api/1.0/users/me",
-        headers=headers
-    )
+        if response.status_code != 200:
+            return None
 
-    if response.status_code != 200:
+        return response.json()["data"]
+    except Exception as e:
+        log_system_error("get_asana_user", e)
         return None
-
-    return response.json()["data"]
 
 
 def get_asana_tasks():
@@ -535,7 +623,6 @@ def get_asana_tasks():
         if not user:
             return "Could not fetch Asana user."
 
-        headers = {"Authorization": f"Bearer {ASANA_TOKEN}"}
         workspace_gid = user["workspaces"][0]["gid"]
 
         params = {
@@ -548,12 +635,13 @@ def get_asana_tasks():
 
         task_response = requests.get(
             "https://app.asana.com/api/1.0/tasks",
-            headers=headers,
+            headers=get_asana_headers(),
             params=params
         )
 
         return json.dumps(task_response.json().get("data", []), indent=2)
     except Exception as e:
+        log_system_error("get_asana_tasks", e)
         return f"Asana fetch failed: {str(e)}"
 
 
@@ -567,11 +655,6 @@ def create_asana_task(task_name):
         if not user:
             return "Could not fetch Asana user."
 
-        headers = {
-            "Authorization": f"Bearer {ASANA_TOKEN}",
-            "Content-Type": "application/json"
-        }
-
         workspace_gid = user["workspaces"][0]["gid"]
 
         data = {
@@ -584,7 +667,7 @@ def create_asana_task(task_name):
 
         response = requests.post(
             "https://app.asana.com/api/1.0/tasks",
-            headers=headers,
+            headers=get_asana_headers(content_type=True),
             json=data
         )
 
@@ -593,6 +676,7 @@ def create_asana_task(task_name):
 
         return f"Asana task creation failed: {response.status_code} {response.text}"
     except Exception as e:
+        log_system_error("create_asana_task", e)
         return f"Asana error: {str(e)}"
 
 
@@ -611,7 +695,8 @@ def get_system_status():
         test_url = f"{SUPABASE_URL}/rest/v1/events_log?select=id&limit=1"
         result = requests.get(test_url, headers=supabase_headers)
         report["supabase"] = "connected" if result.status_code == 200 else "failed"
-    except Exception:
+    except Exception as e:
+        log_system_error("get_system_status.supabase", e)
         report["supabase"] = "failed"
 
     for key, table in checks.items():
@@ -619,22 +704,26 @@ def get_system_status():
             url = f"{SUPABASE_URL}/rest/v1/{table}?select=id"
             result = requests.get(url, headers=supabase_headers)
             report[key] = len(result.json()) if result.status_code == 200 else "failed"
-        except Exception:
+        except Exception as e:
+            log_system_error(f"get_system_status.{table}", e)
             report[key] = "failed"
 
     try:
         report["gmail"] = "connected" if "failed" not in get_gmail_summary().lower() else "failed"
-    except Exception:
+    except Exception as e:
+        log_system_error("get_system_status.gmail", e)
         report["gmail"] = "failed"
 
     try:
         report["calendar"] = "connected" if "failed" not in get_calendar_summary().lower() else "failed"
-    except Exception:
+    except Exception as e:
+        log_system_error("get_system_status.calendar", e)
         report["calendar"] = "failed"
 
     try:
         report["asana"] = "connected" if "failed" not in get_asana_tasks().lower() else "failed"
-    except Exception:
+    except Exception as e:
+        log_system_error("get_system_status.asana", e)
         report["asana"] = "failed"
 
     try:
@@ -643,7 +732,8 @@ def get_system_status():
             report["openai_embeddings"] = "connected"
         else:
             report["openai_embeddings"] = "disabled"
-    except Exception:
+    except Exception as e:
+        log_system_error("get_system_status.openai_embeddings", e)
         report["openai_embeddings"] = "failed"
 
     try:
@@ -653,14 +743,16 @@ def get_system_status():
             messages=[{"role": "user", "content": "hello"}]
         )
         report["claude"] = "connected"
-    except Exception:
+    except Exception as e:
+        log_system_error("get_system_status.claude", e)
         report["claude"] = "failed"
 
     return json.dumps(report, indent=2)
 
 
 async def send_daily_briefing(app):
-    prompt = f"""
+    try:
+        prompt = f"""
 Create my daily AI briefing.
 
 Current date/time:
@@ -691,23 +783,25 @@ Output:
 - concise
 """
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=800,
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-    )
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=800,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
 
-    briefing = response.content[0].text
+        briefing = response.content[0].text
 
-    await app.bot.send_message(
-        chat_id=ALLOWED_USER_ID,
-        text=briefing
-    )
+        await app.bot.send_message(
+            chat_id=ALLOWED_USER_ID,
+            text=briefing
+        )
+    except Exception as e:
+        log_system_error("send_daily_briefing", e)
 
 
 def get_main_menu():
@@ -747,7 +841,46 @@ Raw data:
         return response.content[0].text
 
     except Exception as e:
+        log_system_error("format_with_claude", e)
         return f"{title} failed to format: {str(e)}"
+
+
+FORMATTED_COMMANDS = [
+    (("where am i overspending", "overspending"), "Overspending Analysis", get_overspending_insights),
+    (("gmail summary",), "Gmail Summary", get_gmail_summary),
+    (("calendar summary",), "Calendar Summary", get_calendar_summary),
+    (("asana tasks",), "Asana Tasks", get_asana_tasks),
+    (("finance report",), "Finance Report", get_monthly_spending_breakdown)
+]
+
+LIVE_CONTEXT_PROVIDERS = [
+    (FINANCE_CONTEXT_KEYWORDS, "Finance live data", get_finance_summary),
+    (("email", "gmail"), "Gmail live data", get_gmail_summary),
+    (("calendar", "meeting", "schedule"), "Calendar live data", get_calendar_summary),
+    (("asana", "task", "project"), "Asana live data", get_asana_tasks)
+]
+
+
+def get_formatted_command(text):
+    for aliases, title, provider in FORMATTED_COMMANDS:
+        if text in aliases:
+            return title, provider
+
+    return None
+
+
+def is_calendar_event_request(text):
+    return any(text.startswith(f"{prefix} ") for prefix in CALENDAR_EVENT_PREFIXES)
+
+
+def build_live_context(text):
+    context_parts = []
+
+    for keywords, title, provider in LIVE_CONTEXT_PROVIDERS:
+        if any(keyword in text for keyword in keywords):
+            context_parts.append(f"\n\n{title}:\n{provider()}")
+
+    return "".join(context_parts)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -761,7 +894,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = user_message.lower().strip()
 
     # Simple menu/help
-    if text in ["menu", "start", "help"]:
+    if text in MENU_COMMANDS:
         await update.message.reply_text(
             "Choose an action:",
             reply_markup=get_main_menu()
@@ -785,28 +918,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # Short command handlers
-    if text in ["where am i overspending", "overspending"]:
-        raw = get_overspending_insights()
-        formatted = format_with_claude("Overspending Analysis", raw)
-        await update.message.reply_text(formatted, reply_markup=get_main_menu())
-        return
-
-    if text == "gmail summary":
-        raw = get_gmail_summary()
-        formatted = format_with_claude("Gmail Summary", raw)
-        await update.message.reply_text(formatted, reply_markup=get_main_menu())
-        return
-
-    if text == "calendar summary":
-        raw = get_calendar_summary()
-        formatted = format_with_claude("Calendar Summary", raw)
-        await update.message.reply_text(formatted, reply_markup=get_main_menu())
-        return
-
-    if text == "asana tasks":
-        raw = get_asana_tasks()
-        formatted = format_with_claude("Asana Tasks", raw)
+    command = get_formatted_command(text)
+    if command:
+        title, provider = command
+        raw = provider()
+        formatted = format_with_claude(title, raw)
         await update.message.reply_text(formatted, reply_markup=get_main_menu())
         return
 
@@ -818,12 +934,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Create calendar event from full command
-    if (
-        text.startswith("create calendar event ")
-        or text.startswith("add calendar event ")
-        or text.startswith("schedule event ")
-        or text.startswith("schedule ")
-    ):
+    if is_calendar_event_request(text):
         result = create_calendar_event_from_text(user_message)
         save_to_supabase(user_message, result)
         await update.message.reply_text(result)
@@ -846,13 +957,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(status)
         return
 
-    # Finance report
-    if text == "finance report":
-        raw = get_monthly_spending_breakdown()
-        formatted = format_with_claude("Finance Report", raw)
-        await update.message.reply_text(formatted, reply_markup=get_main_menu())
-        return
-
     # Finance classification / save
     finance_tx = classify_finance_message(user_message)
     if finance_tx:
@@ -868,7 +972,7 @@ Relevant semantic memories:
     runtime_context = f"""
 Current date/time:
 {get_current_datetime()}
-Timezone: Europe/Berlin
+Timezone: {TIMEZONE_NAME}
 """
 
     personal_memory_context = f"""
@@ -876,22 +980,7 @@ Personal memories:
 {json.dumps(get_personal_memories(), indent=2)}
 """
 
-    finance_context = ""
-    gmail_context = ""
-    calendar_context = ""
-    asana_context = ""
-
-    if any(k in text for k in ["finance", "money", "balance", "spend", "spent", "expense", "salary", "income", "budget"]):
-        finance_context = f"\n\nFinance live data:\n{get_finance_summary()}"
-
-    if "email" in text or "gmail" in text:
-        gmail_context = f"\n\nGmail live data:\n{get_gmail_summary()}"
-
-    if "calendar" in text or "meeting" in text or "schedule" in text:
-        calendar_context = f"\n\nCalendar live data:\n{get_calendar_summary()}"
-
-    if "asana" in text or "task" in text or "project" in text:
-        asana_context = f"\n\nAsana live data:\n{get_asana_tasks()}"
+    live_context = build_live_context(text)
 
     # Recent conversation history
     recent_memories = get_recent_memories()
@@ -910,10 +999,7 @@ Personal memories:
             + runtime_context
             + semantic_context
             + personal_memory_context
-            + finance_context
-            + gmail_context
-            + calendar_context
-            + asana_context
+            + live_context
         ),
         messages=conversation_history
     )
@@ -921,6 +1007,10 @@ Personal memories:
     reply = response.content[0].text
     save_to_supabase(user_message, reply)
     await update.message.reply_text(reply)
+
+
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    log_system_error("telegram_error_handler", context.error)
 
 
 def main():
@@ -931,8 +1021,9 @@ def main():
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
+    app.add_error_handler(handle_error)
 
-    scheduler = BackgroundScheduler(timezone="Europe/Berlin")
+    scheduler = BackgroundScheduler(timezone=TIMEZONE_NAME)
 
     scheduler.add_job(
         lambda: app.create_task(send_daily_briefing(app)),
