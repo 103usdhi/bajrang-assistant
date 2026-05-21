@@ -4,6 +4,7 @@ import json
 import logging
 import requests
 import base64
+import random
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
@@ -103,8 +104,23 @@ WAITING_FOR_EMAIL_TO = "waiting_for_email_to"
 WAITING_FOR_EMAIL_SUBJECT = "waiting_for_email_subject"
 WAITING_FOR_EMAIL_BODY = "waiting_for_email_body"
 EMAIL_DRAFT_STATE = "email_draft"
+WAITING_FOR_GERMAN_WORD = "waiting_for_german_word"
+WAITING_FOR_GERMAN_MEANING = "waiting_for_german_meaning"
+WAITING_FOR_GERMAN_EXAMPLE = "waiting_for_german_example"
+GERMAN_WORD_STATE = "german_word"
+WAITING_FOR_GRAMMAR_TOPIC = "waiting_for_grammar_topic"
+WAITING_FOR_GRAMMAR_NOTE = "waiting_for_grammar_note"
+GERMAN_GRAMMAR_STATE = "german_grammar"
+WAITING_FOR_GERMAN_CORRECTION = "waiting_for_german_correction"
+WAITING_FOR_GERMAN_QUIZ_ANSWER = "waiting_for_german_quiz_answer"
+GERMAN_QUIZ_STATE = "german_quiz"
 
 MENU_COMMANDS = {"menu", "start", "help"}
+BACK_COMMANDS = {"back", "main menu"}
+GERMAN_MENU_COMMANDS = {"german a1", "german", "german learning"}
+ADD_GERMAN_WORD_COMMANDS = {"add word", "add german word"}
+ADD_GRAMMAR_RULE_COMMANDS = {"grammar", "add grammar rule"}
+CORRECT_GERMAN_COMMANDS = {"correct german", "correct my german"}
 FINANCE_CONTEXT_KEYWORDS = [
     "finance",
     "money",
@@ -377,6 +393,80 @@ def save_finance_transaction(tx):
     except Exception as e:
         log_system_error("save_finance_transaction", e)
         return False
+
+
+def save_german_word(word, meaning, example_sentence):
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/german_words"
+        data = {
+            "word": word,
+            "meaning": meaning,
+            "example_sentence": example_sentence,
+            "created_at": datetime.now(get_timezone()).isoformat()
+        }
+        result = requests.post(url, headers=supabase_headers, json=data)
+
+        if result.status_code in [200, 201, 204]:
+            return True
+
+        log_system_error(
+            "save_german_word",
+            RuntimeError(f"Supabase returned {result.status_code}: {result.text}")
+        )
+        return False
+    except Exception as e:
+        log_system_error("save_german_word", e)
+        return False
+
+
+def save_grammar_rule(topic, note):
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/german_grammar"
+        data = {
+            "topic": topic,
+            "note": note,
+            "created_at": datetime.now(get_timezone()).isoformat()
+        }
+        result = requests.post(url, headers=supabase_headers, json=data)
+
+        if result.status_code in [200, 201, 204]:
+            return True
+
+        log_system_error(
+            "save_grammar_rule",
+            RuntimeError(f"Supabase returned {result.status_code}: {result.text}")
+        )
+        return False
+    except Exception as e:
+        log_system_error("save_grammar_rule", e)
+        return False
+
+
+def get_random_german_words(limit=3):
+    try:
+        url = (
+            f"{SUPABASE_URL}/rest/v1/german_words"
+            f"?select=word,meaning,example_sentence"
+            f"&order=created_at.desc"
+            f"&limit=50"
+        )
+        result = requests.get(url, headers=supabase_headers)
+
+        if result.status_code != 200:
+            log_system_error(
+                "get_random_german_words",
+                RuntimeError(f"Supabase returned {result.status_code}: {result.text}")
+            )
+            return []
+
+        rows = result.json()
+        if len(rows) <= limit:
+            return rows
+
+        return random.sample(rows, limit)
+    except Exception as e:
+        log_system_error("get_random_german_words", e)
+        return []
 
 
 def get_finance_summary():
@@ -1282,7 +1372,26 @@ def get_main_menu():
         ["Finance Report", "Overspending"],
         ["Gmail Summary", "Calendar Summary"],
         ["Asana Tasks", "Create Calendar Event"],
-        ["Draft Email"]
+        ["Draft Email"],
+        ["Add German Word", "Add Grammar Rule"],
+        ["Quiz Me", "A1 Practice"],
+        ["Correct My German"],
+        ["German A1"]
+    ]
+
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+
+def get_german_a1_menu():
+    keyboard = [
+        ["Add Word", "Grammar"],
+        ["Quiz Me", "Correct German"],
+        ["A1 Practice"],
+        ["Back"]
     ]
 
     return ReplyKeyboardMarkup(
@@ -1476,6 +1585,207 @@ def create_gmail_draft_reply(to_email, subject, body):
     )
 
 
+def generate_a1_practice():
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=450,
+            system="Create compact Goethe A1 German practice. No long explanations.",
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Return exactly: 5 vocab words with meanings, "
+                        "3 grammar tips, 2 speaking questions, 1 writing task."
+                    )
+                }
+            ]
+        )
+        return response.content[0].text
+    except Exception as e:
+        log_system_error("generate_a1_practice", e)
+        return f"A1 practice failed: {str(e)}"
+
+
+def correct_german_text(text):
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=550,
+            system=(
+                "Correct German for an A1 learner. Be concise. Sections: "
+                "Corrected, Mistakes, Improved, Practice Note."
+            ),
+            messages=[
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ]
+        )
+        correction = response.content[0].text
+        save_semantic_memory(
+            "German recurring mistake candidate: "
+            + truncate_text(f"Original: {text} Correction: {correction}", max_length=700)
+        )
+        return correction
+    except Exception as e:
+        log_system_error("correct_german_text", e)
+        return f"German correction failed: {str(e)}"
+
+
+def clear_german_word_state(context):
+    context.user_data.pop(WAITING_FOR_GERMAN_WORD, None)
+    context.user_data.pop(WAITING_FOR_GERMAN_MEANING, None)
+    context.user_data.pop(WAITING_FOR_GERMAN_EXAMPLE, None)
+    context.user_data.pop(GERMAN_WORD_STATE, None)
+
+
+def clear_german_grammar_state(context):
+    context.user_data.pop(WAITING_FOR_GRAMMAR_TOPIC, None)
+    context.user_data.pop(WAITING_FOR_GRAMMAR_NOTE, None)
+    context.user_data.pop(GERMAN_GRAMMAR_STATE, None)
+
+
+def clear_german_quiz_state(context):
+    context.user_data.pop(WAITING_FOR_GERMAN_QUIZ_ANSWER, None)
+    context.user_data.pop(GERMAN_QUIZ_STATE, None)
+
+
+def clear_interaction_states(context):
+    context.user_data.pop(WAITING_FOR_CALENDAR_EVENT, None)
+    clear_email_draft_state(context)
+    clear_german_word_state(context)
+    clear_german_grammar_state(context)
+    context.user_data.pop(WAITING_FOR_GERMAN_CORRECTION, None)
+    clear_german_quiz_state(context)
+
+
+async def handle_german_word_flow(update, context, user_message):
+    try:
+        if context.user_data.get(WAITING_FOR_GERMAN_WORD):
+            context.user_data.pop(WAITING_FOR_GERMAN_WORD, None)
+            context.user_data[WAITING_FOR_GERMAN_MEANING] = True
+            context.user_data[GERMAN_WORD_STATE] = {"word": user_message.strip()}
+            await update.message.reply_text("What does it mean in English?")
+            return True
+
+        if context.user_data.get(WAITING_FOR_GERMAN_MEANING):
+            context.user_data.pop(WAITING_FOR_GERMAN_MEANING, None)
+            context.user_data[WAITING_FOR_GERMAN_EXAMPLE] = True
+            state = context.user_data.setdefault(GERMAN_WORD_STATE, {})
+            state["meaning"] = user_message.strip()
+            await update.message.reply_text("Add one example sentence.")
+            return True
+
+        if context.user_data.get(WAITING_FOR_GERMAN_EXAMPLE):
+            context.user_data.pop(WAITING_FOR_GERMAN_EXAMPLE, None)
+            state = context.user_data.get(GERMAN_WORD_STATE, {})
+            word = state.get("word", "")
+            meaning = state.get("meaning", "")
+            example = user_message.strip()
+            clear_german_word_state(context)
+
+            saved = bool(word and meaning and example and save_german_word(word, meaning, example))
+            reply = (
+                f"Confirmed: saved German word.\nWord: {word}\nMeaning: {meaning}"
+                if saved
+                else "I could not confirm that the German word was saved."
+            )
+            save_to_supabase("Add German Word", reply)
+            await update.message.reply_text(reply, reply_markup=get_german_a1_menu())
+            return True
+
+        return False
+    except Exception as e:
+        log_system_error("handle_german_word_flow", e)
+        clear_german_word_state(context)
+        await update.message.reply_text("German word flow failed.", reply_markup=get_german_a1_menu())
+        return True
+
+
+async def handle_german_grammar_flow(update, context, user_message):
+    try:
+        if context.user_data.get(WAITING_FOR_GRAMMAR_TOPIC):
+            context.user_data.pop(WAITING_FOR_GRAMMAR_TOPIC, None)
+            context.user_data[WAITING_FOR_GRAMMAR_NOTE] = True
+            context.user_data[GERMAN_GRAMMAR_STATE] = {"topic": user_message.strip()}
+            await update.message.reply_text("What note or explanation should I save?")
+            return True
+
+        if context.user_data.get(WAITING_FOR_GRAMMAR_NOTE):
+            context.user_data.pop(WAITING_FOR_GRAMMAR_NOTE, None)
+            state = context.user_data.get(GERMAN_GRAMMAR_STATE, {})
+            topic = state.get("topic", "")
+            note = user_message.strip()
+            clear_german_grammar_state(context)
+
+            saved = bool(topic and note and save_grammar_rule(topic, note))
+            reply = (
+                f"Confirmed: saved grammar rule.\nTopic: {topic}"
+                if saved
+                else "I could not confirm that the grammar rule was saved."
+            )
+            save_to_supabase("Add Grammar Rule", reply)
+            await update.message.reply_text(reply, reply_markup=get_german_a1_menu())
+            return True
+
+        return False
+    except Exception as e:
+        log_system_error("handle_german_grammar_flow", e)
+        clear_german_grammar_state(context)
+        await update.message.reply_text("Grammar rule flow failed.", reply_markup=get_german_a1_menu())
+        return True
+
+
+async def handle_german_correction_flow(update, context, user_message):
+    if not context.user_data.get(WAITING_FOR_GERMAN_CORRECTION):
+        return False
+
+    try:
+        context.user_data.pop(WAITING_FOR_GERMAN_CORRECTION, None)
+        reply = correct_german_text(user_message)
+        save_to_supabase("Correct My German", reply)
+        await update.message.reply_text(reply, reply_markup=get_german_a1_menu())
+        return True
+    except Exception as e:
+        log_system_error("handle_german_correction_flow", e)
+        context.user_data.pop(WAITING_FOR_GERMAN_CORRECTION, None)
+        await update.message.reply_text("German correction failed.", reply_markup=get_german_a1_menu())
+        return True
+
+
+async def handle_german_quiz_flow(update, context, user_message):
+    if not context.user_data.get(WAITING_FOR_GERMAN_QUIZ_ANSWER):
+        return False
+
+    try:
+        context.user_data.pop(WAITING_FOR_GERMAN_QUIZ_ANSWER, None)
+        quiz = context.user_data.get(GERMAN_QUIZ_STATE, {})
+        clear_german_quiz_state(context)
+
+        expected = (quiz.get("meaning") or "").lower()
+        answer = user_message.lower().strip()
+        correct = expected and (answer in expected or expected in answer)
+        reply = (
+            f"Correct. {quiz.get('word')} = {quiz.get('meaning')}"
+            if correct
+            else f"Not quite. {quiz.get('word')} means: {quiz.get('meaning')}"
+        )
+        example = quiz.get("example_sentence")
+        if example:
+            reply += f"\nExample: {example}"
+
+        save_to_supabase("Quiz Me", reply)
+        await update.message.reply_text(reply, reply_markup=get_german_a1_menu())
+        return True
+    except Exception as e:
+        log_system_error("handle_german_quiz_flow", e)
+        clear_german_quiz_state(context)
+        await update.message.reply_text("German quiz failed.", reply_markup=get_german_a1_menu())
+        return True
+
+
 def clear_email_draft_state(context):
     context.user_data.pop(WAITING_FOR_EMAIL_TO, None)
     context.user_data.pop(WAITING_FOR_EMAIL_SUBJECT, None)
@@ -1553,6 +1863,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     text = user_message.lower().strip()
 
+    if text in BACK_COMMANDS:
+        clear_interaction_states(context)
+        await update.message.reply_text("Back to main menu.", reply_markup=get_main_menu())
+        return
+
     if context.user_data.get(WAITING_FOR_CALENDAR_EVENT):
         context.user_data.pop(WAITING_FOR_CALENDAR_EVENT, None)
         reply = create_calendar_event_reply(user_message)
@@ -1563,11 +1878,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await handle_email_draft_flow(update, context, user_message):
         return
 
+    if await handle_german_word_flow(update, context, user_message):
+        return
+
+    if await handle_german_grammar_flow(update, context, user_message):
+        return
+
+    if await handle_german_correction_flow(update, context, user_message):
+        return
+
+    if await handle_german_quiz_flow(update, context, user_message):
+        return
+
     # Simple menu/help
     if text in MENU_COMMANDS:
         await update.message.reply_text(
             "Choose an action:",
             reply_markup=get_main_menu()
+        )
+        return
+
+    if text in GERMAN_MENU_COMMANDS:
+        await update.message.reply_text(
+            "German A1 practice:",
+            reply_markup=get_german_a1_menu()
         )
         return
 
@@ -1613,6 +1947,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Who should the draft email be addressed to?"
         )
+        return
+
+    if text in ADD_GERMAN_WORD_COMMANDS:
+        clear_german_word_state(context)
+        context.user_data[WAITING_FOR_GERMAN_WORD] = True
+        await update.message.reply_text("What German word should I save?")
+        return
+
+    if text in ADD_GRAMMAR_RULE_COMMANDS:
+        clear_german_grammar_state(context)
+        context.user_data[WAITING_FOR_GRAMMAR_TOPIC] = True
+        await update.message.reply_text("What grammar topic should I save?")
+        return
+
+    if text in CORRECT_GERMAN_COMMANDS:
+        context.user_data[WAITING_FOR_GERMAN_CORRECTION] = True
+        await update.message.reply_text("Send the German sentence or text you want corrected.")
+        return
+
+    if text == "a1 practice":
+        reply = generate_a1_practice()
+        save_to_supabase(user_message, reply)
+        await update.message.reply_text(reply, reply_markup=get_german_a1_menu())
+        return
+
+    if text == "quiz me":
+        words = get_random_german_words(limit=1)
+
+        if not words:
+            reply = "No German words found yet. Add a word first."
+            await update.message.reply_text(reply, reply_markup=get_german_a1_menu())
+            return
+
+        quiz = words[0]
+        context.user_data[GERMAN_QUIZ_STATE] = quiz
+        context.user_data[WAITING_FOR_GERMAN_QUIZ_ANSWER] = True
+        await update.message.reply_text(f"Quiz: What does '{quiz.get('word')}' mean?")
         return
 
     # Create Asana task
