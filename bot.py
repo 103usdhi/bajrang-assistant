@@ -793,11 +793,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-    if text == "asana tasks":
-    raw = get_asana_tasks()
-    formatted = format_with_claude("Asana Tasks", raw)
-    await update.message.reply_text(formatted, reply_markup=get_main_menu())
-    return
+        if text == "asana tasks":
+            raw = get_asana_tasks()
+            formatted = format_with_claude("Asana Tasks", raw)
+            await update.message.reply_text(formatted, reply_markup=get_main_menu())
+            return
 
 
     if text == "create calendar event":
