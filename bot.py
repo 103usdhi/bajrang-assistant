@@ -32,6 +32,9 @@ GOOGLE_TOKEN_JSON = os.getenv("GOOGLE_TOKEN_JSON")
 ALLOWED_USER_ID = 8106199737
 TIMEZONE_NAME = "Europe/Berlin"
 GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
+RECENT_EXCHANGE_LIMIT = 6
+PERSONAL_MEMORY_LIMIT = 15
+SEMANTIC_MEMORY_MATCH_COUNT = 2
 
 logging.basicConfig(level=logging.INFO)
 
@@ -191,7 +194,12 @@ def save_to_supabase(user_message, assistant_response):
 
 def get_recent_memories():
     try:
-        url = f"{SUPABASE_URL}/rest/v1/events_log?select=user_message,assistant_response&order=created_at.desc&limit=20"
+        url = (
+            f"{SUPABASE_URL}/rest/v1/events_log"
+            f"?select=user_message,assistant_response"
+            f"&order=created_at.desc"
+            f"&limit={RECENT_EXCHANGE_LIMIT}"
+        )
         result = requests.get(url, headers=supabase_headers)
         return result.json() if result.status_code == 200 else []
     except Exception as e:
@@ -225,7 +233,13 @@ def save_personal_memory(memory_text):
 
 def get_personal_memories():
     try:
-        url = f"{SUPABASE_URL}/rest/v1/personal_memory?select=memory_text&is_active=eq.true&order=created_at.desc&limit=50"
+        url = (
+            f"{SUPABASE_URL}/rest/v1/personal_memory"
+            f"?select=memory_text"
+            f"&is_active=eq.true"
+            f"&order=created_at.desc"
+            f"&limit={PERSONAL_MEMORY_LIMIT}"
+        )
         result = requests.get(url, headers=supabase_headers)
         return result.json() if result.status_code == 200 else []
     except Exception as e:
@@ -281,7 +295,7 @@ def search_semantic_memory(query):
         data = {
             "query_embedding": embedding,
             "match_threshold": 0.70,
-            "match_count": 5
+            "match_count": SEMANTIC_MEMORY_MATCH_COUNT
         }
         result = requests.post(url, headers=supabase_headers, json=data)
         return result.json() if result.status_code == 200 else []
@@ -529,7 +543,7 @@ def get_gmail_summary():
 
         results = service.users().messages().list(
             userId="me",
-            maxResults=5,
+            maxResults=3,
             q="in:inbox"
         ).execute()
 
@@ -626,7 +640,7 @@ def get_calendar_summary():
             calendarId="primary",
             timeMin=now.isoformat(),
             timeMax=end.isoformat(),
-            maxResults=20,
+            maxResults=10,
             singleEvents=True,
             orderBy="startTime"
         ).execute()
@@ -762,7 +776,7 @@ def get_asana_tasks():
             "assignee": user["gid"],
             "workspace": workspace_gid,
             "completed_since": "now",
-            "limit": 20,
+            "limit": 10,
             "opt_fields": "name,due_on,completed,projects.name"
         }
 
@@ -1216,7 +1230,7 @@ Current date/time:
 {get_current_datetime()}
 
 Personal memories:
-{json.dumps(get_personal_memories(), indent=2)}
+{compact_json(get_personal_memories())}
 
 Finance:
 {get_finance_summary()}
@@ -1242,7 +1256,7 @@ Output:
 
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=800,
+            max_tokens=650,
             messages=[
                 {
                     "role": "user",
@@ -1280,19 +1294,15 @@ def get_main_menu():
 
 def format_with_claude(title, raw_data):
     try:
+        raw_data = truncate_text(raw_data, max_length=3500)
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=700,
-            system="Format raw assistant data into a clean, readable Telegram message. Use short headings, bullets or tables. Do not show JSON.",
+            max_tokens=450,
+            system="Format for Telegram. Be concise. Use short headings/bullets. Hide raw JSON.",
             messages=[
                 {
                     "role": "user",
-                    "content": f"""
-Title: {title}
-
-Raw data:
-{raw_data}
-"""
+                    "content": f"{title}\n{raw_data}"
                 }
             ]
         )
@@ -1312,11 +1322,25 @@ FORMATTED_COMMANDS = [
     (("finance report",), "Finance Report", get_monthly_spending_breakdown)
 ]
 
+EXPLICIT_DATA_ACTION_WORDS = (
+    "show",
+    "summarize",
+    "summary",
+    "check",
+    "read",
+    "list",
+    "what",
+    "which",
+    "when",
+    "where",
+    "tell"
+)
+
 LIVE_CONTEXT_PROVIDERS = [
-    (FINANCE_CONTEXT_KEYWORDS, "Finance live data", get_finance_summary),
-    (("email", "gmail"), "Gmail live data", get_gmail_summary),
-    (("calendar", "meeting", "schedule"), "Calendar live data", get_calendar_summary),
-    (("asana", "task", "project"), "Asana live data", get_asana_tasks)
+    (lambda text: any(k in text for k in FINANCE_CONTEXT_KEYWORDS), "Finance", get_finance_summary),
+    (lambda text: is_explicit_gmail_context_request(text), "Gmail", get_gmail_summary),
+    (lambda text: is_explicit_calendar_context_request(text), "Calendar", get_calendar_summary),
+    (lambda text: is_explicit_asana_context_request(text), "Asana", get_asana_tasks)
 ]
 
 
@@ -1345,6 +1369,25 @@ def is_email_action_request(text):
 
 def is_draft_email_request(text):
     return text in {"draft email", "create email draft", "draft gmail", "create gmail draft"}
+
+
+def has_explicit_data_action(text):
+    return any(word in text for word in EXPLICIT_DATA_ACTION_WORDS)
+
+
+def is_explicit_gmail_context_request(text):
+    gmail_words = ("gmail", "email", "inbox", "mail")
+    return has_explicit_data_action(text) and any(word in text for word in gmail_words)
+
+
+def is_explicit_calendar_context_request(text):
+    calendar_words = ("calendar", "meeting", "appointment", "agenda")
+    return has_explicit_data_action(text) and any(word in text for word in calendar_words)
+
+
+def is_explicit_asana_context_request(text):
+    asana_words = ("asana", "task", "tasks", "project", "projects")
+    return has_explicit_data_action(text) and any(word in text for word in asana_words)
 
 
 def is_unsupported_external_action_request(text):
@@ -1489,11 +1532,15 @@ def get_unsupported_action_reply():
 def build_live_context(text):
     context_parts = []
 
-    for keywords, title, provider in LIVE_CONTEXT_PROVIDERS:
-        if any(keyword in text for keyword in keywords):
+    for should_fetch, title, provider in LIVE_CONTEXT_PROVIDERS:
+        if should_fetch(text):
             context_parts.append(f"\n\n{title}:\n{provider()}")
 
     return "".join(context_parts)
+
+
+def compact_json(data):
+    return json.dumps(data, separators=(",", ":"))
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1628,10 +1675,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Semantic search & contexts
     semantic_results = search_semantic_memory(user_message)
-    semantic_context = f"""
-Relevant semantic memories:
-{json.dumps(semantic_results, indent=2)}
-"""
+    semantic_context = ""
+
+    if semantic_results:
+        semantic_context = f"\nRelevant semantic memories: {compact_json(semantic_results)}"
 
     runtime_context = f"""
 Current date/time:
@@ -1639,10 +1686,11 @@ Current date/time:
 Timezone: {TIMEZONE_NAME}
 """
 
-    personal_memory_context = f"""
-Personal memories:
-{json.dumps(get_personal_memories(), indent=2)}
-"""
+    personal_memories = get_personal_memories()
+    personal_memory_context = ""
+
+    if personal_memories:
+        personal_memory_context = f"\nPersonal memories: {compact_json(personal_memories)}"
 
     live_context = build_live_context(text)
 
@@ -1657,7 +1705,7 @@ Personal memories:
     # Query Claude
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=1200,
+        max_tokens=900,
         system=(
             SYSTEM_PROMPT
             + runtime_context
