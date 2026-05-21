@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -710,12 +710,72 @@ Output:
     )
 
 
+def get_main_menu():
+    keyboard = [
+        ["System Status", "Daily Briefing"],
+        ["Finance Report", "Overspending"],
+        ["Gmail Summary", "Calendar Summary"],
+        ["Asana Tasks", "Create Calendar Event"]
+    ]
+
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER_ID:
         return
 
     user_message = update.message.text
     text = user_message.lower()
+    
+    if text in ["menu", "start", "help"]:
+        await update.message.reply_text(
+            "Choose an action:",
+            reply_markup=get_main_menu()
+        )
+        return
+
+    if text == "system status":
+        status = get_system_status()
+        await update.message.reply_text(status, reply_markup=get_main_menu())
+        return
+
+    if text == "daily briefing":
+        await send_daily_briefing(context.application)
+        return
+
+    if text == "finance report":
+        report = get_monthly_spending_breakdown()
+        await update.message.reply_text(report, reply_markup=get_main_menu())
+        return
+
+    if text == "overspending":
+        insights = get_overspending_insights()
+        await update.message.reply_text(insights, reply_markup=get_main_menu())
+        return
+
+    if text == "gmail summary":
+        await update.message.reply_text(get_gmail_summary(), reply_markup=get_main_menu())
+        return
+
+    if text == "calendar summary":
+        await update.message.reply_text(get_calendar_summary(), reply_markup=get_main_menu())
+        return
+
+    if text == "asana tasks":
+        await update.message.reply_text(get_asana_tasks(), reply_markup=get_main_menu())
+        return
+
+    if text == "create calendar event":
+        await update.message.reply_text(
+            "Send it like this:\ncreate calendar event Dentist tomorrow 15:00",
+            reply_markup=get_main_menu()
+        )
+        return
 
     await update.message.chat.send_action("typing")
 
