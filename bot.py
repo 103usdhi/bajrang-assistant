@@ -253,6 +253,87 @@ def get_finance_summary():
         return f"Finance fetch failed: {str(e)}"
 
 
+def get_monthly_spending_breakdown():
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/finance_transactions?select=amount,category,transaction_type"
+        result = requests.get(url, headers=supabase_headers)
+
+        if result.status_code != 200:
+            return "Finance analytics failed."
+
+        rows = result.json()
+        category_totals = {}
+        total_spending = 0
+
+        for row in rows:
+            if row.get("transaction_type") != "expense":
+                continue
+
+            category = row.get("category") or "general"
+            amount = float(row.get("amount") or 0)
+
+            total_spending += amount
+            category_totals[category] = category_totals.get(category, 0) + amount
+
+        sorted_categories = sorted(
+            category_totals.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        return json.dumps({
+            "total_spending": round(total_spending, 2),
+            "top_categories": sorted_categories[:10]
+        }, indent=2)
+
+    except Exception as e:
+        return f"Finance analytics failed: {str(e)}"
+
+
+def get_overspending_insights():
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/finance_transactions?select=amount,category,transaction_type,is_essential"
+        result = requests.get(url, headers=supabase_headers)
+
+        if result.status_code != 200:
+            return "Overspending analysis failed."
+
+        rows = result.json()
+        essential = 0
+        non_essential = 0
+        categories = {}
+
+        for row in rows:
+            if row.get("transaction_type") != "expense":
+                continue
+
+            amount = float(row.get("amount") or 0)
+
+            if row.get("is_essential"):
+                essential += amount
+            else:
+                non_essential += amount
+
+            category = row.get("category") or "general"
+            categories[category] = categories.get(category, 0) + amount
+
+        biggest = sorted(
+            categories.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:5]
+
+        return json.dumps({
+            "essential_spending": round(essential, 2),
+            "non_essential_spending": round(non_essential, 2),
+            "top_expense_categories": biggest,
+            "warning": "High non-essential spending detected." if non_essential > essential else "Spending pattern looks balanced."
+        }, indent=2)
+
+    except Exception as e:
+        return f"Overspending analysis failed: {str(e)}"
+
+
 def get_google_credentials():
     if not GOOGLE_TOKEN_JSON:
         return None
@@ -329,6 +410,105 @@ def get_calendar_summary():
         return json.dumps(events_result.get("items", []), indent=2)
     except Exception as e:
         return f"Calendar fetch failed: {str(e)}"
+
+
+def parse_calendar_event_request(message):
+    text = message.strip()
+
+    prefixes = [
+        "create calendar event",
+        "add calendar event",
+        "schedule event",
+        "schedule"
+    ]
+
+    clean = text
+
+    for prefix in prefixes:
+        if clean.lower().startswith(prefix):
+            clean = clean[len(prefix):].strip()
+            break
+
+    timezone = ZoneInfo("Europe/Berlin")
+    now = datetime.now(timezone)
+
+    event_date = now.date()
+
+    if "tomorrow" in clean.lower():
+        event_date = (now + timedelta(days=1)).date()
+        clean = re.sub(r"\btomorrow\b", "", clean, flags=re.IGNORECASE)
+
+    elif "today" in clean.lower():
+        event_date = now.date()
+        clean = re.sub(r"\btoday\b", "", clean, flags=re.IGNORECASE)
+
+    date_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", clean)
+
+    if date_match:
+        event_date = datetime.strptime(date_match.group(1), "%Y-%m-%d").date()
+        clean = clean.replace(date_match.group(1), "")
+
+    time_match = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", clean)
+
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+        clean = clean.replace(time_match.group(0), "")
+    else:
+        hour = 9
+        minute = 0
+
+    title = clean.strip()
+
+    if not title:
+        title = "Untitled event"
+
+    start_dt = datetime(
+        event_date.year,
+        event_date.month,
+        event_date.day,
+        hour,
+        minute,
+        tzinfo=timezone
+    )
+
+    end_dt = start_dt + timedelta(hours=1)
+
+    return title, start_dt, end_dt
+
+
+def create_calendar_event_from_text(message):
+    try:
+        creds = get_google_credentials()
+
+        if not creds:
+            return "Google token missing."
+
+        title, start_dt, end_dt = parse_calendar_event_request(message)
+
+        service = build("calendar", "v3", credentials=creds)
+
+        event_body = {
+            "summary": title,
+            "start": {
+                "dateTime": start_dt.isoformat(),
+                "timeZone": "Europe/Berlin"
+            },
+            "end": {
+                "dateTime": end_dt.isoformat(),
+                "timeZone": "Europe/Berlin"
+            }
+        }
+
+        created_event = service.events().insert(
+            calendarId="primary",
+            body=event_body
+        ).execute()
+
+        return f"Calendar event created: {title} at {start_dt.strftime('%Y-%m-%d %H:%M')}"
+
+    except Exception as e:
+        return f"Calendar event creation failed: {str(e)}"
 
 
 def get_asana_user():
@@ -415,305 +595,65 @@ def create_asana_task(task_name):
     except Exception as e:
         return f"Asana error: {str(e)}"
 
-# =========================
-# FINANCE ANALYTICS
-# =========================
-
-def get_monthly_spending_breakdown():
-
-    try:
-
-        url = (
-            f"{SUPABASE_URL}/rest/v1/"
-            "finance_transactions"
-            "?select=amount,category,transaction_type"
-        )
-
-        result = requests.get(
-            url,
-            headers=supabase_headers
-        )
-
-        if result.status_code != 200:
-            return "Finance analytics failed."
-
-        rows = result.json()
-
-        category_totals = {}
-        total_spending = 0
-
-        for row in rows:
-
-            if row["transaction_type"] != "expense":
-                continue
-
-            category = row["category"] or "general"
-            amount = float(row["amount"])
-
-            total_spending += amount
-
-            if category not in category_totals:
-                category_totals[category] = 0
-
-            category_totals[category] += amount
-
-        sorted_categories = sorted(
-            category_totals.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )
-
-        report = {
-            "total_spending": round(total_spending, 2),
-            "top_categories": sorted_categories[:10]
-        }
-
-        return json.dumps(report, indent=2)
-
-    except Exception as e:
-        return f"Finance analytics failed: {str(e)}"
-
-
-def get_overspending_insights():
-
-    try:
-
-        url = (
-            f"{SUPABASE_URL}/rest/v1/"
-            "finance_transactions"
-            "?select=amount,category,transaction_type,is_essential"
-        )
-
-        result = requests.get(
-            url,
-            headers=supabase_headers
-        )
-
-        if result.status_code != 200:
-            return "Overspending analysis failed."
-
-        rows = result.json()
-
-        essential = 0
-        non_essential = 0
-
-        categories = {}
-
-        for row in rows:
-
-            if row["transaction_type"] != "expense":
-                continue
-
-            amount = float(row["amount"])
-
-            if row["is_essential"]:
-                essential += amount
-            else:
-                non_essential += amount
-
-            category = row["category"] or "general"
-
-            if category not in categories:
-                categories[category] = 0
-
-            categories[category] += amount
-
-        biggest = sorted(
-            categories.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )[:5]
-
-        insights = {
-            "essential_spending": round(essential, 2),
-            "non_essential_spending": round(non_essential, 2),
-            "top_expense_categories": biggest,
-            "warning": (
-                "High non-essential spending detected."
-                if non_essential > essential
-                else "Spending pattern looks balanced."
-            )
-        }
-
-        return json.dumps(insights, indent=2)
-
-    except Exception as e:
-        return f"Overspending analysis failed: {str(e)}"
-
-# =========================
-# SYSTEM STATUS
-# =========================
 
 def get_system_status():
-
     report = {}
-
-    # Current time
     report["current_time"] = get_current_datetime()
 
-    # Supabase connection
-    try:
+    checks = {
+        "events_log_count": "events_log",
+        "personal_memory_count": "personal_memory",
+        "semantic_memory_count": "semantic_memory",
+        "finance_transactions_count": "finance_transactions"
+    }
 
+    try:
         test_url = f"{SUPABASE_URL}/rest/v1/events_log?select=id&limit=1"
+        result = requests.get(test_url, headers=supabase_headers)
+        report["supabase"] = "connected" if result.status_code == 200 else "failed"
+    except Exception:
+        report["supabase"] = "failed"
 
-        result = requests.get(
-            test_url,
-            headers=supabase_headers
-        )
+    for key, table in checks.items():
+        try:
+            url = f"{SUPABASE_URL}/rest/v1/{table}?select=id"
+            result = requests.get(url, headers=supabase_headers)
+            report[key] = len(result.json()) if result.status_code == 200 else "failed"
+        except Exception:
+            report[key] = "failed"
 
-        report["supabase"] = (
-            "connected"
-            if result.status_code == 200
-            else "failed"
-        )
-
-    except Exception as e:
-        report["supabase"] = str(e)
-
-    # Events log count
     try:
-
-        url = f"{SUPABASE_URL}/rest/v1/events_log?select=id"
-
-        result = requests.get(
-            url,
-            headers=supabase_headers
-        )
-
-        report["events_log_count"] = (
-            len(result.json())
-            if result.status_code == 200
-            else "failed"
-        )
-
-    except:
-        report["events_log_count"] = "failed"
-
-    # Personal memory count
-    try:
-
-        url = f"{SUPABASE_URL}/rest/v1/personal_memory?select=id"
-
-        result = requests.get(
-            url,
-            headers=supabase_headers
-        )
-
-        report["personal_memory_count"] = (
-            len(result.json())
-            if result.status_code == 200
-            else "failed"
-        )
-
-    except:
-        report["personal_memory_count"] = "failed"
-
-    # Semantic memory count
-    try:
-
-        url = f"{SUPABASE_URL}/rest/v1/semantic_memory?select=id"
-
-        result = requests.get(
-            url,
-            headers=supabase_headers
-        )
-
-        report["semantic_memory_count"] = (
-            len(result.json())
-            if result.status_code == 200
-            else "failed"
-        )
-
-    except:
-        report["semantic_memory_count"] = "failed"
-
-    # Finance transaction count
-    try:
-
-        url = f"{SUPABASE_URL}/rest/v1/finance_transactions?select=id"
-
-        result = requests.get(
-            url,
-            headers=supabase_headers
-        )
-
-        report["finance_transactions_count"] = (
-            len(result.json())
-            if result.status_code == 200
-            else "failed"
-        )
-
-    except:
-        report["finance_transactions_count"] = "failed"
-
-    # Gmail
-    try:
-
-        gmail = get_gmail_summary()
-
-        if "failed" in gmail.lower():
-            report["gmail"] = "failed"
-        else:
-            report["gmail"] = "connected"
-
-    except:
+        report["gmail"] = "connected" if "failed" not in get_gmail_summary().lower() else "failed"
+    except Exception:
         report["gmail"] = "failed"
 
-    # Calendar
     try:
-
-        calendar = get_calendar_summary()
-
-        if "failed" in calendar.lower():
-            report["calendar"] = "failed"
-        else:
-            report["calendar"] = "connected"
-
-    except:
+        report["calendar"] = "connected" if "failed" not in get_calendar_summary().lower() else "failed"
+    except Exception:
         report["calendar"] = "failed"
 
-    # Asana
     try:
-
-        asana = get_asana_tasks()
-
-        if "failed" in asana.lower():
-            report["asana"] = "failed"
-        else:
-            report["asana"] = "connected"
-
-    except:
+        report["asana"] = "connected" if "failed" not in get_asana_tasks().lower() else "failed"
+    except Exception:
         report["asana"] = "failed"
 
-    # OpenAI
     try:
-
         if openai_client:
-            embedding = generate_embedding("test")
+            generate_embedding("test")
             report["openai_embeddings"] = "connected"
         else:
             report["openai_embeddings"] = "disabled"
-
-    except:
+    except Exception:
         report["openai_embeddings"] = "failed"
 
-    # Claude
     try:
-
-        test = client.messages.create(
+        client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=10,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "hello"
-                }
-            ]
+            messages=[{"role": "user", "content": "hello"}]
         )
-
         report["claude"] = "connected"
-
-    except:
+    except Exception:
         report["claude"] = "failed"
 
     return json.dumps(report, indent=2)
@@ -786,13 +726,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if remember_text:
         saved = save_personal_memory(remember_text)
 
-        if saved:
-            reply = f"Remembered: {remember_text}"
-        else:
-            reply = "Memory save failed."
+        reply = f"Remembered: {remember_text}" if saved else "Memory save failed."
 
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply)
+        return
+
+    if text == "system status":
+        status = get_system_status()
+        await update.message.reply_text(status)
+        return
+
+    if text == "finance report":
+        report = get_monthly_spending_breakdown()
+        await update.message.reply_text(report)
+        return
+
+    if text == "where am i overspending":
+        insights = get_overspending_insights()
+        await update.message.reply_text(insights)
+        return
+
+    if text.startswith("create calendar event ") or text.startswith("add calendar event ") or text.startswith("schedule event "):
+        result = create_calendar_event_from_text(user_message)
+        save_to_supabase(user_message, result)
+        await update.message.reply_text(result)
         return
 
     if text.startswith("create task ") or text.startswith("add task "):
@@ -850,31 +808,6 @@ Personal memories:
     if "daily briefing" in text or "morning briefing" in text:
         await send_daily_briefing(context.application)
         return
-	
-    if text == "system status":
-
-        status = get_system_status()
-
-        await update.message.reply_text(status)
-
-        return
-
-    if text == "finance report":
-
-        report = get_monthly_spending_breakdown()
-
-        await update.message.reply_text(report)
-
-        return
-
-    if text == "where am i overspending":
-
-        insights = get_overspending_insights()
-
-        await update.message.reply_text(insights)
-
-        return
-
 
     recent_memories = get_recent_memories()
 
