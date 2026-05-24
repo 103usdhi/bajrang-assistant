@@ -330,7 +330,7 @@ def search_semantic_memory(query):
 
 def classify_finance_message(message):
     text = message.lower()
-    amount_match = re.search(r"(\d+(\.\d+)?)", text)
+    amount_match = re.search(r"\b(\d+(?:\.\d+)?)\b", text)
 
     if not amount_match:
         return None
@@ -2098,12 +2098,11 @@ def compact_json(data):
     return json.dumps(data, separators=(",", ":"))
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, overridden_text=None):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, overridden_text=None, is_voice_input=False, is_internal=False):
     if update.effective_user.id != ALLOWED_USER_ID:
         return
 
-    is_voice_input = overridden_text is not None
-    user_message = overridden_text if is_voice_input else (update.message.text if update.message else None)
+    user_message = overridden_text if overridden_text is not None else (update.message.text if update.message else None)
     voice_replies_enabled = context.user_data.get("voice_replies_enabled", False)
 
     if not user_message:
@@ -2170,22 +2169,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         return
 
     # Persist semantic memory for inputs
-    save_semantic_memory(user_message)
+    if not is_internal:
+        save_semantic_memory(user_message)
 
     # "Remember ..." handling
-    remember_text = detect_remember_command(user_message)
-    if remember_text:
-        saved = save_personal_memory(remember_text)
-        reply = (
-            f"Confirmed: I saved this memory.\nMemory: {remember_text}"
-            if saved
-            else "I could not confirm that this memory was saved. Please try again or check system logs."
-        )
-        save_to_supabase(user_message, reply)
-        await update.message.reply_text(reply)
-        if is_voice_input and voice_replies_enabled:
-            await send_voice_reply(update, reply)
-        return
+    if not is_internal:
+        remember_text = detect_remember_command(user_message)
+        if remember_text:
+            saved = save_personal_memory(remember_text)
+            reply = (
+                f"Confirmed: I saved this memory.\nMemory: {remember_text}"
+                if saved
+                else "I could not confirm that this memory was saved. Please try again or check system logs."
+            )
+            save_to_supabase(user_message, reply)
+            await update.message.reply_text(reply)
+            if is_voice_input and voice_replies_enabled:
+                await send_voice_reply(update, reply)
+            return
 
     command = get_formatted_command(text)
     if command:
@@ -2321,15 +2322,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         return
 
     # Finance classification / save
-    finance_tx = classify_finance_message(user_message)
-    if finance_tx:
-        saved = save_finance_transaction(finance_tx)
-        reply = format_finance_confirmation(finance_tx, saved)
-        save_to_supabase(user_message, reply)
-        await update.message.reply_text(reply)
-        if is_voice_input and voice_replies_enabled:
-            await send_voice_reply(update, reply)
-        return
+    if not is_internal:
+        finance_tx = classify_finance_message(user_message)
+        if finance_tx:
+            saved = save_finance_transaction(finance_tx)
+            reply = format_finance_confirmation(finance_tx, saved)
+            save_to_supabase(user_message, reply)
+            await update.message.reply_text(reply)
+            if is_voice_input and voice_replies_enabled:
+                await send_voice_reply(update, reply)
+            return
 
     if is_unsupported_external_action_request(text):
         reply = get_unsupported_action_reply()
@@ -2402,7 +2404,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("I couldn't hear that clearly. Could you try again?")
         return
 
-    await handle_message(update, context, overridden_text=transcription)
+    await handle_message(update, context, overridden_text=transcription, is_voice_input=True)
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2460,7 +2462,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         await status_msg.edit_text("Generating summary...")
-        await handle_message(update, context, overridden_text=processing_prompt)
+        await handle_message(update, context, overridden_text=processing_prompt, is_internal=True)
 
         await update.message.reply_text(
             f"{ICON_CHECK} PDF Ingestion Complete:\n"
