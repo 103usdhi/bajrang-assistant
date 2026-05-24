@@ -63,6 +63,7 @@ CRITICAL RULES:
 - Never claim that calendar events, Asana tasks, emails, or database writes were completed unless an actual API/database result confirms success.
 - If the user asks for an external action that is unsupported or unconfirmed, say that it was not completed and explain what is available.
 - Be direct, intelligent and helpful.
+- Documents may be stored as searchable semantic chunks and document records. Use retrieved context when relevant, but avoid claiming perfect exact-document recall.
 - When responding via voice, maintain a warm, conversational, and natural tone.
 """
 
@@ -292,6 +293,21 @@ def generate_embedding(text):
     return response.data[0].embedding
 
 
+def get_finance_summary():
+    """Aggregates balance and monthly spending for AI context."""
+    try:
+        # Using your existing breakdown/overspending logic to feed the AI context
+        spending = get_monthly_spending_breakdown()
+        insights = get_overspending_insights()
+        return json.dumps({
+            "monthly_breakdown": json.loads(spending) if "failed" not in spending else spending,
+            "insights": json.loads(insights) if "failed" not in insights else insights
+        }, indent=2)
+    except Exception as e:
+        log_system_error("get_finance_summary", e)
+        return "Finance summary unavailable."
+
+
 def save_semantic_memory(content, source="telegram"):
     if not openai_client:
         return
@@ -307,6 +323,34 @@ def save_semantic_memory(content, source="telegram"):
         requests.post(url, headers=supabase_headers, json=data)
     except Exception as e:
         log_system_error("save_semantic_memory", e)
+
+
+def save_document_metadata(doc_data):
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/uploaded_documents"
+        result = requests.post(url, headers=supabase_headers, json=doc_data)
+        if result.status_code in [200, 201, 204]:
+            return True
+        log_system_error("save_document_metadata", RuntimeError(f"Supabase returned {result.status_code}"))
+        return False
+    except Exception as e:
+        log_system_error("save_document_metadata", e)
+        return False
+
+
+def get_uploaded_documents(limit=5):
+    try:
+        url = (
+            f"{SUPABASE_URL}/rest/v1/uploaded_documents"
+            f"?select=filename,document_type,created_at,semantic_chunk_count"
+            f"&order=created_at.desc"
+            f"&limit={limit}"
+        )
+        result = requests.get(url, headers=supabase_headers)
+        return result.json() if result.status_code == 200 else []
+    except Exception as e:
+        log_system_error("get_uploaded_documents", e)
+        return []
 
 
 def search_semantic_memory(query):
@@ -330,20 +374,15 @@ def search_semantic_memory(query):
 
 def classify_finance_message(message):
     text = message.lower()
-
-    # Requirement: Only classify finance when there is a clear intent word
-    # Requirement: Do not treat words like "also" as expense intent
     intent_keywords = [
-        "spent", "paid", "bought", "salary", "income", "saved",
-        "invested", "rent", "bill", "cost", "expense", "refund",
-        "loan", "emi"
+        "spent", "paid", "bought", "salary", "income", "saved", 
+        "invested", "rent", "bill", "cost", "expense", "refund", 
+        "loan", "emi", "received", "bonus", "got paid"
     ]
 
     if not any(kw in text for kw in intent_keywords):
         return None
 
-    # Requirement: Word boundaries ensure standalone digits/amounts are found,
-    # but numeric parts of codes like A1 or B2 are ignored by the regex engine.
     amount_match = re.search(r"\b(\d+(?:\.\d+)?)\b", text)
 
     if not amount_match:
@@ -467,73 +506,6 @@ def save_grammar_rule(topic, note):
         return False
 
 
-def get_random_german_words(limit=3):
-    try:
-        url = (
-            f"{SUPABASE_URL}/rest/v1/german_words"
-            f"?select=word,meaning,example_sentence"
-            f"&order=created_at.desc"
-            f"&limit=50"
-        )
-        result = requests.get(url, headers=supabase_headers)
-
-        if result.status_code != 200:
-            log_system_error(
-                "get_random_german_words",
-                RuntimeError(f"Supabase returned {result.status_code}: {result.text}")
-            )
-            return []
-
-        rows = result.json()
-        if len(rows) <= limit:
-            return rows
-
-        return random.sample(rows, limit)
-    except Exception as e:
-        log_system_error("get_random_german_words", e)
-        return []
-
-
-def get_finance_summary():
-    try:
-        balance_url = f"{SUPABASE_URL}/rest/v1/finance_balance_overview?select=*"
-        monthly_url = f"{SUPABASE_URL}/rest/v1/finance_current_month_spending?select=*"
-
-        balance = requests.get(balance_url, headers=supabase_headers)
-        monthly = requests.get(monthly_url, headers=supabase_headers)
-
-        return json.dumps({
-            "balance_overview": balance.json() if balance.status_code == 200 else [],
-            "current_month_spending": monthly.json() if monthly.status_code == 200 else []
-        }, indent=2)
-    except Exception as e:
-        log_system_error("get_finance_summary", e)
-        return f"Finance fetch failed: {str(e)}"
-
-
-def get_finance_transactions(select_columns):
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/finance_transactions?select={select_columns}"
-        result = requests.get(url, headers=supabase_headers)
-
-        if result.status_code != 200:
-            return None
-
-        return result.json()
-    except Exception as e:
-        log_system_error("get_finance_transactions", e)
-        return None
-
-
-def iter_expense_rows(rows):
-    for row in rows:
-        if row.get("transaction_type") != "expense":
-            continue
-
-        category = row.get("category") or "general"
-        amount = float(row.get("amount") or 0)
-
-        yield row, category, amount
 
 
 def get_monthly_spending_breakdown():
@@ -1377,29 +1349,35 @@ def get_system_status():
     report = {}
     report["current_time"] = get_current_datetime()
 
+    # Comprehensive table check matching schema.sql
     checks = {
         "events_log_count": "events_log",
         "personal_memory_count": "personal_memory",
         "semantic_memory_count": "semantic_memory",
-        "finance_transactions_count": "finance_transactions"
+        "finance_transactions_count": "finance_transactions",
+        "vocab_count": "german_vocabulary",
+        "srs_progress_count": "user_vocab_progress",
+        "documents_count": "uploaded_documents",
+        "logs_count": "system_logs"
     }
 
+    # Check Supabase Connectivity
     try:
-        test_url = f"{SUPABASE_URL}/rest/v1/events_log?select=id&limit=1"
-        result = requests.get(test_url, headers=supabase_headers)
-        report["supabase"] = "connected" if result.status_code == 200 else "failed"
+        report["supabase"] = "connected"
+        for key, table in checks.items():
+            url = f"{SUPABASE_URL}/rest/v1/{table}?select=id&limit=1"
+            result = requests.get(url, headers=supabase_headers, timeout=5)
+            if result.status_code == 404:
+                report["supabase"] = "partial" # Table missing
+                report[key] = "failed"
+            else:
+                # Fetch count for reporting
+                count_url = f"{SUPABASE_URL}/rest/v1/{table}?select=id"
+                count_res = requests.get(count_url, headers=supabase_headers, timeout=5)
+                report[key] = len(count_res.json()) if count_res.status_code == 200 else "failed"
     except Exception as e:
-        log_system_error("get_system_status.supabase", e)
+        log_system_error("get_system_status.database_checks", e)
         report["supabase"] = "failed"
-
-    for key, table in checks.items():
-        try:
-            url = f"{SUPABASE_URL}/rest/v1/{table}?select=id"
-            result = requests.get(url, headers=supabase_headers)
-            report[key] = len(result.json()) if result.status_code == 200 else "failed"
-        except Exception as e:
-            log_system_error(f"get_system_status.{table}", e)
-            report[key] = "failed"
 
     try:
         report["gmail"] = "connected" if "failed" not in get_gmail_summary().lower() else "failed"
@@ -1575,14 +1553,29 @@ EXPLICIT_DATA_ACTION_WORDS = (
     "tell"
 )
 
+def is_explicit_document_context_request(text):
+    doc_words = ("document", "documents", "pdf", "pdfs", "file", "files", "uploaded")
+    return has_explicit_data_action(text) and any(word in text for word in doc_words)
+
+
+def get_documents_summary():
+    try:
+        docs = get_uploaded_documents(limit=10)
+        if not docs:
+            return "No documents found."
+        return json.dumps(docs, indent=2)
+    except Exception as e:
+        log_system_error("get_documents_summary", e)
+        return "Failed to fetch document summary."
+
+
 LIVE_CONTEXT_PROVIDERS = [
     (lambda text: any(k in text for k in FINANCE_CONTEXT_KEYWORDS), "Finance", get_finance_summary),
     (lambda text: is_explicit_gmail_context_request(text), "Gmail", get_gmail_summary),
     (lambda text: is_explicit_calendar_context_request(text), "Calendar", get_calendar_summary),
-    (lambda text: is_explicit_asana_context_request(text), "Asana", get_asana_tasks)
+    (lambda text: is_explicit_asana_context_request(text), "Asana", get_asana_tasks),
+    (lambda text: is_explicit_document_context_request(text), "Uploaded Documents", get_documents_summary)
 ]
-
-
 def get_formatted_command(text):
     for aliases, title, provider in FORMATTED_COMMANDS:
         if text in aliases:
@@ -2186,12 +2179,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         await send_daily_briefing(context.application)
         return
 
-    # Persist semantic memory for inputs
-    if not is_internal: # Requirement: Skip semantic memory saving
+    if text == "documents":
+        docs = get_uploaded_documents(limit=10)
+        if not docs:
+            await update.message.reply_text("No documents found.")
+            return
+
+        lines = [f"{ICON_CLIPBOARD} Recently Uploaded Documents", ""]
+        for d in docs:
+            dt_str = d.get("created_at", "")
+            dt = parse_log_datetime(dt_str)
+            date_fmt = dt.strftime("%Y-%m-%d") if dt else "Unknown"
+            lines.append(f"• {d['filename']} ({d['document_type']})")
+            lines.append(f"  Date: {date_fmt} | Chunks: {d['semantic_chunk_count']}")
+            lines.append("")
+
+        await update.message.reply_text("\n".join(lines).strip())
+        return
+
+    # Consolidated automated detection for user messages
+    if not is_internal:
         save_semantic_memory(user_message)
 
-    # "Remember ..." handling
-    if not is_internal: # Requirement: Skip remember command detection
         remember_text = detect_remember_command(user_message)
         if remember_text:
             saved = save_personal_memory(remember_text)
@@ -2200,6 +2209,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
                 if saved
                 else "I could not confirm that this memory was saved. Please try again or check system logs."
             )
+            save_to_supabase(user_message, reply)
+            await update.message.reply_text(reply)
+            if is_voice_input and voice_replies_enabled:
+                await send_voice_reply(update, reply)
+            return
+
+        finance_tx = classify_finance_message(user_message)
+        if finance_tx:
+            saved = save_finance_transaction(finance_tx)
+            reply = format_finance_confirmation(finance_tx, saved)
             save_to_supabase(user_message, reply)
             await update.message.reply_text(reply)
             if is_voice_input and voice_replies_enabled:
@@ -2339,18 +2358,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         await update.message.reply_text(reply)
         return
 
-    # Finance classification / save
-    if not is_internal: # Requirement: Skip finance classification
-        finance_tx = classify_finance_message(user_message)
-        if finance_tx:
-            saved = save_finance_transaction(finance_tx)
-            reply = format_finance_confirmation(finance_tx, saved)
-            save_to_supabase(user_message, reply)
-            await update.message.reply_text(reply)
-            if is_voice_input and voice_replies_enabled:
-                await send_voice_reply(update, reply)
-            return
-
     if is_unsupported_external_action_request(text):
         reply = get_unsupported_action_reply()
         save_to_supabase(user_message, reply)
@@ -2470,11 +2477,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for chunk in chunks:
             save_semantic_memory(chunk, source="pdf")
 
+        # Save metadata
+        doc_data = {
+            "filename": doc.file_name,
+            "telegram_file_id": doc.file_id,
+            "document_type": "pdf",
+            "source": "telegram",
+            "page_count": page_count,
+            "semantic_chunk_count": len(chunks),
+            "storage_status": "telegram",
+            "extracted_text_summary": truncate_text(text_content, 1000),
+            "local_processing_path": temp_path
+        }
+        save_document_metadata(doc_data)
+
         # Create a short summary from only the first 2 chunks
         summary_text = "\n".join(chunks[:2])
         processing_prompt = (
-            "I have processed a PDF document and stored its full content in my semantic memory. "
-            "Based on the following opening segments, provide a concise overview of what this document is about. "
+            "The uploaded document has been preserved as a document record and split into searchable semantic chunks for later retrieval. "
+            "Based *only* on the following opening segments, provide a concise overview of what this document is about. "
             "If it is German A1 learning material, identify the main topics.\n\n"
             f"Segments:\n{truncate_text(summary_text, 16000, preserve_newlines=True)}"
         )
@@ -2483,7 +2504,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_message(update, context, overridden_text=processing_prompt, is_internal=True)
 
         await update.message.reply_text(
-            f"{ICON_CHECK} PDF Ingestion Complete:\n"
+            f"{ICON_CHECK} Document Processing Complete:\n"
+            f"- Filename: {doc.file_name}\n"
             f"- Pages: {page_count}\n"
             f"- Semantic chunks saved: {len(chunks)}"
         )
