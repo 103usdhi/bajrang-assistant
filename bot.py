@@ -156,8 +156,7 @@ ICON_MAGNIFIER = "\U0001f50e"
 supabase_headers = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json",
-    "Prefer": "return=minimal"
+    "Content-Type": "application/json"
 }
 
 
@@ -192,7 +191,7 @@ def log_system_error(module, error):
     try:
         url = f"{SUPABASE_URL}/rest/v1/system_logs"
         data = {
-            "timestamp": datetime.now(get_timezone()).isoformat(),
+            "created_at": datetime.now(get_timezone()).isoformat(),
             "module": module,
             "error_message": error_message
         }
@@ -1059,7 +1058,7 @@ def parse_log_datetime(value):
 
 
 def get_log_sort_timestamp(row):
-    logged_at = parse_log_datetime(row.get("timestamp"))
+    logged_at = parse_log_datetime(row.get("created_at"))
 
     if not logged_at:
         return 0
@@ -1167,7 +1166,7 @@ def format_module_summary(rows):
 
 def format_incident_entry(row):
     module = row.get("module") or "unknown"
-    timestamp = format_log_time(row.get("timestamp"))
+    timestamp = format_log_time(row.get("created_at"))
     error_message = truncate_text(row.get("error_message"), max_length=180)
 
     return [
@@ -1191,8 +1190,8 @@ def format_system_errors(rows):
         reverse=True
     )
     grouped = group_errors_by_severity(rows)
-    latest_time = format_log_time(rows[0].get("timestamp"))
-    oldest_time = format_log_time(rows[-1].get("timestamp"))
+    latest_time = format_log_time(rows[0].get("created_at"))
+    oldest_time = format_log_time(rows[-1].get("created_at"))
 
     lines = [
         f"{ICON_CLIPBOARD} Incident Dashboard",
@@ -1229,8 +1228,8 @@ def get_recent_system_errors(limit=10):
     try:
         url = (
             f"{SUPABASE_URL}/rest/v1/system_logs"
-            f"?select=timestamp,module,error_message"
-            f"&order=timestamp.desc"
+            f"?select=created_at,module,error_message"
+            f"&order=created_at.desc"
             f"&limit={limit}"
         )
         result = requests.get(url, headers=supabase_headers)
@@ -1410,7 +1409,7 @@ def get_system_status():
 
     try:
         client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-3-5-sonnet-20240620",
             max_tokens=10,
             messages=[{"role": "user", "content": "hello"}]
         )
@@ -1456,7 +1455,7 @@ Output:
 """
 
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-3-5-sonnet-20240620",
             max_tokens=650,
             messages=[
                 {
@@ -1514,7 +1513,7 @@ def format_with_claude(title, raw_data):
     try:
         raw_data = truncate_text(raw_data, max_length=3500)
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-3-5-sonnet-20240620",
             max_tokens=450,
             system="Format for Telegram. Be concise. Use short headings/bullets. Hide raw JSON.",
             messages=[
@@ -1697,7 +1696,7 @@ def create_gmail_draft_reply(to_email, subject, body):
 def generate_a1_practice():
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-3-5-sonnet-20240620",
             max_tokens=450,
             system="Create compact Goethe A1 German practice. No long explanations.",
             messages=[
@@ -1719,7 +1718,7 @@ def generate_a1_practice():
 def correct_german_text(text):
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-3-5-sonnet-20240620",
             max_tokens=550,
             system=(
                 "Correct German for an A1 learner. Be concise. Sections: "
@@ -2317,7 +2316,7 @@ Timezone: {TIMEZONE_NAME}
 
     # Query Claude
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-3-5-sonnet-20240620",
         max_tokens=900,
         system=(
             SYSTEM_PROMPT
