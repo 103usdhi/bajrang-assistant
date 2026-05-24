@@ -57,6 +57,7 @@ CRITICAL RULES:
 - Never claim that calendar events, Asana tasks, emails, or database writes were completed unless an actual API/database result confirms success.
 - If the user asks for an external action that is unsupported or unconfirmed, say that it was not completed and explain what is available.
 - Be direct, intelligent and helpful.
+- When responding via voice, maintain a warm, conversational, and natural tone.
 """
 
 FINANCE_CATEGORY_RULES = {
@@ -1659,13 +1660,16 @@ def clear_interaction_states(context):
     clear_german_quiz_state(context)
 
 
-async def handle_german_word_flow(update, context, user_message):
+async def handle_german_word_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
     try:
         if context.user_data.get(WAITING_FOR_GERMAN_WORD):
             context.user_data.pop(WAITING_FOR_GERMAN_WORD, None)
             context.user_data[WAITING_FOR_GERMAN_MEANING] = True
             context.user_data[GERMAN_WORD_STATE] = {"word": user_message.strip()}
-            await update.message.reply_text("What does it mean in English?")
+            reply = "What does it mean in English?"
+            await update.message.reply_text(reply)
+            if is_voice_input and voice_replies_enabled:
+                await send_voice_reply(update, reply)
             return True
 
         if context.user_data.get(WAITING_FOR_GERMAN_MEANING):
@@ -1673,7 +1677,10 @@ async def handle_german_word_flow(update, context, user_message):
             context.user_data[WAITING_FOR_GERMAN_EXAMPLE] = True
             state = context.user_data.setdefault(GERMAN_WORD_STATE, {})
             state["meaning"] = user_message.strip()
-            await update.message.reply_text("Add one example sentence.")
+            reply = "Add one example sentence."
+            await update.message.reply_text(reply)
+            if is_voice_input and voice_replies_enabled:
+                await send_voice_reply(update, reply)
             return True
 
         if context.user_data.get(WAITING_FOR_GERMAN_EXAMPLE):
@@ -1692,6 +1699,8 @@ async def handle_german_word_flow(update, context, user_message):
             )
             save_to_supabase("Add German Word", reply)
             await update.message.reply_text(reply, reply_markup=get_german_a1_menu())
+            if is_voice_input and voice_replies_enabled:
+                await send_voice_reply(update, reply)
             return True
 
         return False
@@ -1702,13 +1711,16 @@ async def handle_german_word_flow(update, context, user_message):
         return True
 
 
-async def handle_german_grammar_flow(update, context, user_message):
+async def handle_german_grammar_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
     try:
         if context.user_data.get(WAITING_FOR_GRAMMAR_TOPIC):
             context.user_data.pop(WAITING_FOR_GRAMMAR_TOPIC, None)
             context.user_data[WAITING_FOR_GRAMMAR_NOTE] = True
             context.user_data[GERMAN_GRAMMAR_STATE] = {"topic": user_message.strip()}
-            await update.message.reply_text("What note or explanation should I save?")
+            reply = "What note or explanation should I save?"
+            await update.message.reply_text(reply)
+            if is_voice_input and voice_replies_enabled:
+                await send_voice_reply(update, reply)
             return True
 
         if context.user_data.get(WAITING_FOR_GRAMMAR_NOTE):
@@ -1726,6 +1738,8 @@ async def handle_german_grammar_flow(update, context, user_message):
             )
             save_to_supabase("Add Grammar Rule", reply)
             await update.message.reply_text(reply, reply_markup=get_german_a1_menu())
+            if is_voice_input and voice_replies_enabled:
+                await send_voice_reply(update, reply)
             return True
 
         return False
@@ -1736,7 +1750,7 @@ async def handle_german_grammar_flow(update, context, user_message):
         return True
 
 
-async def handle_german_correction_flow(update, context, user_message):
+async def handle_german_correction_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
     if not context.user_data.get(WAITING_FOR_GERMAN_CORRECTION):
         return False
 
@@ -1745,6 +1759,8 @@ async def handle_german_correction_flow(update, context, user_message):
         reply = correct_german_text(user_message)
         save_to_supabase("Correct My German", reply)
         await update.message.reply_text(reply, reply_markup=get_german_a1_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return True
     except Exception as e:
         log_system_error("handle_german_correction_flow", e)
@@ -1753,7 +1769,7 @@ async def handle_german_correction_flow(update, context, user_message):
         return True
 
 
-async def handle_german_quiz_flow(update, context, user_message):
+async def handle_german_quiz_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
     if not context.user_data.get(WAITING_FOR_GERMAN_QUIZ_ANSWER):
         return False
 
@@ -1776,6 +1792,8 @@ async def handle_german_quiz_flow(update, context, user_message):
 
         save_to_supabase("Quiz Me", reply)
         await update.message.reply_text(reply, reply_markup=get_german_a1_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return True
     except Exception as e:
         log_system_error("handle_german_quiz_flow", e)
@@ -1791,12 +1809,15 @@ def clear_email_draft_state(context):
     context.user_data.pop(EMAIL_DRAFT_STATE, None)
 
 
-async def handle_email_draft_flow(update, context, user_message):
+async def handle_email_draft_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
     if context.user_data.get(WAITING_FOR_EMAIL_TO):
         context.user_data.pop(WAITING_FOR_EMAIL_TO, None)
         context.user_data[WAITING_FOR_EMAIL_SUBJECT] = True
         context.user_data[EMAIL_DRAFT_STATE] = {"to": user_message.strip()}
-        await update.message.reply_text("What subject should I use?")
+        reply = "What subject should I use?"
+        await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return True
 
     if context.user_data.get(WAITING_FOR_EMAIL_SUBJECT):
@@ -1804,7 +1825,10 @@ async def handle_email_draft_flow(update, context, user_message):
         context.user_data[WAITING_FOR_EMAIL_BODY] = True
         draft = context.user_data.setdefault(EMAIL_DRAFT_STATE, {})
         draft["subject"] = user_message.strip()
-        await update.message.reply_text("What should the email say?")
+        reply = "What should the email say?"
+        await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return True
 
     if context.user_data.get(WAITING_FOR_EMAIL_BODY):
@@ -1825,6 +1849,8 @@ async def handle_email_draft_flow(update, context, user_message):
 
         save_to_supabase("Draft Email", reply)
         await update.message.reply_text(reply, reply_markup=get_main_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return True
 
     return False
@@ -1947,19 +1973,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
             await send_voice_reply(update, reply)
         return
 
-    if await handle_email_draft_flow(update, context, user_message):
+    if await handle_email_draft_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
         return
 
-    if await handle_german_word_flow(update, context, user_message):
+    if await handle_german_word_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
         return
 
-    if await handle_german_grammar_flow(update, context, user_message):
+    if await handle_german_grammar_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
         return
 
-    if await handle_german_correction_flow(update, context, user_message):
+    if await handle_german_correction_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
         return
 
-    if await handle_german_quiz_flow(update, context, user_message):
+    if await handle_german_quiz_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
         return
 
     # Simple menu/help
@@ -2010,40 +2036,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     if text == "create calendar event":
         context.user_data[WAITING_FOR_CALENDAR_EVENT] = True
-        await update.message.reply_text(
-            "What would you like to schedule?\nExample: Dentist tomorrow 15:00"
-        )
+        reply = "What would you like to schedule?\nExample: Dentist tomorrow 15:00"
+        await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     if is_draft_email_request(text):
         clear_email_draft_state(context)
         context.user_data[WAITING_FOR_EMAIL_TO] = True
-        await update.message.reply_text(
-            "Who should the draft email be addressed to?"
-        )
+        reply = "Who should the draft email be addressed to?"
+        await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     if text in ADD_GERMAN_WORD_COMMANDS:
         clear_german_word_state(context)
         context.user_data[WAITING_FOR_GERMAN_WORD] = True
-        await update.message.reply_text("What German word should I save?")
+        reply = "What German word should I save?"
+        await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     if text in ADD_GRAMMAR_RULE_COMMANDS:
         clear_german_grammar_state(context)
         context.user_data[WAITING_FOR_GRAMMAR_TOPIC] = True
-        await update.message.reply_text("What grammar topic should I save?")
+        reply = "What grammar topic should I save?"
+        await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     if text in CORRECT_GERMAN_COMMANDS:
         context.user_data[WAITING_FOR_GERMAN_CORRECTION] = True
-        await update.message.reply_text("Send the German sentence or text you want corrected.")
+        reply = "Send the German sentence or text you want corrected."
+        await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     if text == "a1 practice":
         reply = generate_a1_practice()
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply, reply_markup=get_german_a1_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     if text == "quiz me":
@@ -2057,7 +2096,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         quiz = words[0]
         context.user_data[GERMAN_QUIZ_STATE] = quiz
         context.user_data[WAITING_FOR_GERMAN_QUIZ_ANSWER] = True
-        await update.message.reply_text(f"Quiz: What does '{quiz.get('word')}' mean?")
+        reply = f"Quiz: What does '{quiz.get('word')}' mean?"
+        await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     # Create Asana task
@@ -2189,7 +2231,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("I couldn't hear that clearly. Could you try again?")
         return
 
-    await update.message.reply_text(f"I heard: {transcription}")
     await handle_message(update, context, overridden_text=transcription)
 
 
