@@ -330,6 +330,20 @@ def search_semantic_memory(query):
 
 def classify_finance_message(message):
     text = message.lower()
+
+    # Requirement: Only classify finance when there is a clear intent word
+    # Requirement: Do not treat words like "also" as expense intent
+    intent_keywords = [
+        "spent", "paid", "bought", "salary", "income", "saved",
+        "invested", "rent", "bill", "cost", "expense", "refund",
+        "loan", "emi"
+    ]
+
+    if not any(kw in text for kw in intent_keywords):
+        return None
+
+    # Requirement: Word boundaries ensure standalone digits/amounts are found,
+    # but numeric parts of codes like A1 or B2 are ignored by the regex engine.
     amount_match = re.search(r"\b(\d+(?:\.\d+)?)\b", text)
 
     if not amount_match:
@@ -340,7 +354,7 @@ def classify_finance_message(message):
 
     if any(k in text for k in ["salary", "income", "received", "bonus", "got paid"]):
         transaction_type = "income"
-    elif any(k in text for k in ["spent", "paid", "bought", "expense", "cost", "also"]):
+    elif any(k in text for k in ["spent", "paid", "bought", "expense", "cost", "rent", "bill"]):
         transaction_type = "expense"
     elif any(k in text for k in ["saved", "saving"]):
         transaction_type = "saving"
@@ -2105,6 +2119,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     user_message = overridden_text if overridden_text is not None else (update.message.text if update.message else None)
     voice_replies_enabled = context.user_data.get("voice_replies_enabled", False)
 
+    # Requirement: Skip voice reply generation for internal messages
+    if is_internal:
+        voice_replies_enabled = False
+
     if not user_message:
         return
 
@@ -2169,11 +2187,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         return
 
     # Persist semantic memory for inputs
-    if not is_internal:
+    if not is_internal: # Requirement: Skip semantic memory saving
         save_semantic_memory(user_message)
 
     # "Remember ..." handling
-    if not is_internal:
+    if not is_internal: # Requirement: Skip remember command detection
         remember_text = detect_remember_command(user_message)
         if remember_text:
             saved = save_personal_memory(remember_text)
@@ -2322,7 +2340,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         return
 
     # Finance classification / save
-    if not is_internal:
+    if not is_internal: # Requirement: Skip finance classification
         finance_tx = classify_finance_message(user_message)
         if finance_tx:
             saved = save_finance_transaction(finance_tx)
