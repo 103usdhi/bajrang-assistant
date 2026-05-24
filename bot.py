@@ -195,7 +195,8 @@ def log_system_error(module, error):
             "module": module,
             "error_message": error_message
         }
-        requests.post(url, headers=supabase_headers, json=data, timeout=10)
+        # Using a timeout to ensure the main thread isn't held up indefinitely
+        requests.post(url, headers=supabase_headers, json=data, timeout=5)
     except Exception as logging_error:
         logging.error("system_logs write failed: %s", logging_error)
 
@@ -1409,7 +1410,7 @@ def get_system_status():
 
     try:
         client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-3-5-sonnet-latest",
             max_tokens=10,
             messages=[{"role": "user", "content": "hello"}]
         )
@@ -1455,7 +1456,7 @@ Output:
 """
 
         response = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-3-5-sonnet-latest",
             max_tokens=650,
             messages=[
                 {
@@ -1513,7 +1514,7 @@ def format_with_claude(title, raw_data):
     try:
         raw_data = truncate_text(raw_data, max_length=3500)
         response = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-3-5-sonnet-latest",
             max_tokens=450,
             system="Format for Telegram. Be concise. Use short headings/bullets. Hide raw JSON.",
             messages=[
@@ -1696,7 +1697,7 @@ def create_gmail_draft_reply(to_email, subject, body):
 def generate_a1_practice():
     try:
         response = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-3-5-sonnet-latest",
             max_tokens=450,
             system="Create compact Goethe A1 German practice. No long explanations.",
             messages=[
@@ -1718,7 +1719,7 @@ def generate_a1_practice():
 def correct_german_text(text):
     try:
         response = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-3-5-sonnet-latest",
             max_tokens=550,
             system=(
                 "Correct German for an A1 learner. Be concise. Sections: "
@@ -2316,7 +2317,7 @@ Timezone: {TIMEZONE_NAME}
 
     # Query Claude
     response = client.messages.create(
-        model="claude-3-5-sonnet-20240620",
+        model="claude-3-5-sonnet-latest",
         max_tokens=900,
         system=(
             SYSTEM_PROMPT
