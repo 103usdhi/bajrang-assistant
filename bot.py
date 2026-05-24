@@ -6,6 +6,7 @@ import requests
 import base64
 import random
 from datetime import datetime, timedelta
+import tempfile
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
@@ -1846,19 +1847,91 @@ def build_live_context(text):
     return "".join(context_parts)
 
 
+async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Transcribes a Telegram voice message using OpenAI Whisper."""
+    if not openai_client:
+        log_system_error("voice_transcription", "OpenAI client not initialized")
+        return None
+
+    temp_path = None
+    try:
+        voice_file = await update.message.voice.get_file()
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tf:
+            temp_path = tf.name
+        await voice_file.download_to_drive(temp_path)
+
+        with open(temp_path, "rb") as audio_file:
+            transcript = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file
+            )
+        return transcript.text
+    except Exception as e:
+        log_system_error("voice_transcription", e)
+        return None
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+async def send_voice_reply(update: Update, text: str):
+    """Converts text to speech and sends it as a Telegram voice message if allowed."""
+    if not openai_client:
+        return
+
+    # Cost safety: Do not use TTS for long replies
+    if len(text) > 700:
+        return
+
+    temp_path = None
+    try:
+        # Clean markdown/formatting lightly before speech
+        clean_text = re.sub(r"[*_`#]", "", text)
+
+        response = openai_client.audio.speech.create(
+            model="tts-1",
+            voice="alloy",
+            input=clean_text
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
+            temp_path = tf.name
+        response.stream_to_file(temp_path)
+
+        with open(temp_path, "rb") as voice_fh:
+            await update.message.reply_voice(voice=voice_fh)
+    except Exception as e:
+        log_system_error("voice_tts", e)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
 def compact_json(data):
     return json.dumps(data, separators=(",", ":"))
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, overridden_text=None):
     if update.effective_user.id != ALLOWED_USER_ID:
         return
 
-    if not update.message or not update.message.text:
+    is_voice_input = overridden_text is not None
+    user_message = overridden_text if is_voice_input else (update.message.text if update.message else None)
+    voice_replies_enabled = context.user_data.get("voice_replies_enabled", False)
+
+    if not user_message:
         return
 
-    user_message = update.message.text
     text = user_message.lower().strip()
+
+    if text == "voice replies on":
+        context.user_data["voice_replies_enabled"] = True
+        await update.message.reply_text("Voice replies are now ON.")
+        return
+    if text == "voice replies off":
+        context.user_data["voice_replies_enabled"] = False
+        await update.message.reply_text("Voice replies are now OFF.")
+        return
 
     if text in BACK_COMMANDS:
         clear_interaction_states(context)
@@ -1870,6 +1943,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = create_calendar_event_reply(user_message)
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply, reply_markup=get_main_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     if await handle_email_draft_flow(update, context, user_message):
@@ -1921,6 +1996,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     command = get_formatted_command(text)
@@ -1997,6 +2074,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     # Create calendar event from full command
@@ -2004,6 +2083,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = create_calendar_event_reply(user_message)
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     # System status
@@ -2033,6 +2114,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = format_finance_confirmation(finance_tx, saved)
         save_to_supabase(user_message, reply)
         await update.message.reply_text(reply)
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
         return
 
     if is_unsupported_external_action_request(text):
@@ -2087,6 +2170,27 @@ Timezone: {TIMEZONE_NAME}
     reply = response.content[0].text
     save_to_supabase(user_message, reply)
     await update.message.reply_text(reply)
+    if is_voice_input and voice_replies_enabled:
+        await send_voice_reply(update, reply)
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for Telegram voice messages."""
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+
+    voice = update.message.voice
+    if voice.duration > 90:
+        await update.message.reply_text("Voice note is too long (limit 90s).")
+        return
+
+    transcription = await transcribe_voice(update, context)
+    if not transcription:
+        await update.message.reply_text("I couldn't hear that clearly. Could you try again?")
+        return
+
+    await update.message.reply_text(f"I heard: {transcription}")
+    await handle_message(update, context, overridden_text=transcription)
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -2101,6 +2205,7 @@ def main():
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_error_handler(handle_error)
 
     scheduler = BackgroundScheduler(timezone=TIMEZONE_NAME)
