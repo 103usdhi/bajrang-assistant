@@ -41,6 +41,7 @@ GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
 RECENT_EXCHANGE_LIMIT = 6
 PERSONAL_MEMORY_LIMIT = 15
 SEMANTIC_MEMORY_MATCH_COUNT = 2
+CLAUDE_MODEL = "claude-sonnet-4-6"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1410,7 +1411,7 @@ def get_system_status():
 
     try:
         client.messages.create(
-            model="claude-3-5-sonnet-latest",
+            model=CLAUDE_MODEL,
             max_tokens=10,
             messages=[{"role": "user", "content": "hello"}]
         )
@@ -1456,7 +1457,7 @@ Output:
 """
 
         response = client.messages.create(
-            model="claude-3-5-sonnet-latest",
+            model=CLAUDE_MODEL,
             max_tokens=650,
             messages=[
                 {
@@ -1514,7 +1515,7 @@ def format_with_claude(title, raw_data):
     try:
         raw_data = truncate_text(raw_data, max_length=3500)
         response = client.messages.create(
-            model="claude-3-5-sonnet-latest",
+            model=CLAUDE_MODEL,
             max_tokens=450,
             system="Format for Telegram. Be concise. Use short headings/bullets. Hide raw JSON.",
             messages=[
@@ -1697,7 +1698,7 @@ def create_gmail_draft_reply(to_email, subject, body):
 def generate_a1_practice():
     try:
         response = client.messages.create(
-            model="claude-3-5-sonnet-latest",
+            model=CLAUDE_MODEL,
             max_tokens=450,
             system="Create compact Goethe A1 German practice. No long explanations.",
             messages=[
@@ -1719,7 +1720,7 @@ def generate_a1_practice():
 def correct_german_text(text):
     try:
         response = client.messages.create(
-            model="claude-3-5-sonnet-latest",
+            model=CLAUDE_MODEL,
             max_tokens=550,
             system=(
                 "Correct German for an A1 learner. Be concise. Sections: "
@@ -2317,7 +2318,7 @@ Timezone: {TIMEZONE_NAME}
 
     # Query Claude
     response = client.messages.create(
-        model="claude-3-5-sonnet-latest",
+        model=CLAUDE_MODEL,
         max_tokens=900,
         system=(
             SYSTEM_PROMPT
