@@ -199,7 +199,7 @@ def log_system_error(module, error):
             "error_message": error_message
         }
         # Using a timeout to ensure the main thread isn't held up indefinitely
-        requests.post(url, headers=supabase_headers, json=data, timeout=5)
+        requests.post(url, headers=supabase_headers, json=data, timeout=10)
     except Exception as logging_error:
         logging.error("system_logs write failed: %s", logging_error)
 
@@ -212,7 +212,9 @@ def save_to_supabase(user_message, assistant_response):
             "assistant_response": assistant_response,
             "source": "telegram"
         }
-        requests.post(url, headers=supabase_headers, json=data)
+        res = requests.post(url, headers=supabase_headers, json=data, timeout=10)
+        if res.status_code not in [200, 201, 204]:
+            log_system_error("save_to_supabase", f"Supabase returned {res.status_code}: {res.text}")
     except Exception as e:
         log_system_error("save_to_supabase", e)
 
@@ -225,7 +227,7 @@ def get_recent_memories():
             f"&order=created_at.desc"
             f"&limit={RECENT_EXCHANGE_LIMIT}"
         )
-        result = requests.get(url, headers=supabase_headers)
+        result = requests.get(url, headers=supabase_headers, timeout=10)
         return result.json() if result.status_code == 200 else []
     except Exception as e:
         log_system_error("get_recent_memories", e)
@@ -242,7 +244,7 @@ def save_personal_memory(memory_text):
             "source": "telegram",
             "is_active": True
         }
-        result = requests.post(url, headers=supabase_headers, json=data)
+        result = requests.post(url, headers=supabase_headers, json=data, timeout=10)
         if result.status_code in [200, 201, 204]:
             return True
 
@@ -265,7 +267,7 @@ def get_personal_memories():
             f"&order=created_at.desc"
             f"&limit={PERSONAL_MEMORY_LIMIT}"
         )
-        result = requests.get(url, headers=supabase_headers)
+        result = requests.get(url, headers=supabase_headers, timeout=10)
         return result.json() if result.status_code == 200 else []
     except Exception as e:
         log_system_error("get_personal_memories", e)
@@ -320,7 +322,7 @@ def save_semantic_memory(content, source="telegram"):
             "source": source,
             "embedding": embedding
         }
-        requests.post(url, headers=supabase_headers, json=data)
+        requests.post(url, headers=supabase_headers, json=data, timeout=10)
     except Exception as e:
         log_system_error("save_semantic_memory", e)
 
@@ -328,7 +330,7 @@ def save_semantic_memory(content, source="telegram"):
 def save_document_metadata(doc_data):
     try:
         url = f"{SUPABASE_URL}/rest/v1/uploaded_documents"
-        result = requests.post(url, headers=supabase_headers, json=doc_data)
+        result = requests.post(url, headers=supabase_headers, json=doc_data, timeout=10)
         if result.status_code in [200, 201, 204]:
             return True
         log_system_error("save_document_metadata", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
@@ -346,7 +348,7 @@ def get_uploaded_documents(limit=5):
             f"&order=created_at.desc"
             f"&limit={limit}"
         )
-        result = requests.get(url, headers=supabase_headers)
+        result = requests.get(url, headers=supabase_headers, timeout=10)
         return result.json() if result.status_code == 200 else []
     except Exception as e:
         log_system_error("get_uploaded_documents", e)
@@ -365,7 +367,7 @@ def search_semantic_memory(query):
             "match_threshold": 0.70,
             "match_count": SEMANTIC_MEMORY_MATCH_COUNT
         }
-        result = requests.post(url, headers=supabase_headers, json=data)
+        result = requests.post(url, headers=supabase_headers, json=data, timeout=10)
         return result.json() if result.status_code == 200 else []
     except Exception as e:
         log_system_error("search_semantic_memory", e)
@@ -435,14 +437,10 @@ def save_finance_transaction(tx):
             "currency": "EUR",
             "transaction_type": tx["transaction_type"],
             "category": tx["category"],
-            "subcategory": tx["subcategory"],
             "description": tx["description"],
-            "raw_user_message": tx["raw_user_message"],
-            "source": "telegram",
-            "is_essential": tx["is_essential"],
-            "confidence_score": 0.85
+            "is_essential": tx["is_essential"]
         }
-        result = requests.post(url, headers=supabase_headers, json=data)
+        result = requests.post(url, headers=supabase_headers, json=data, timeout=10)
         if result.status_code in [200, 201, 204]:
             return True
 
@@ -458,7 +456,7 @@ def save_finance_transaction(tx):
 
 def save_german_word(word, meaning, example_sentence, article=None, plural=None):
     try:
-        url = f"{SUPABASE_URL}/rest/v1/german_vocabulary"
+        url = f"{SUPABASE_URL}/rest/v1/german_words"
         data = {
             "word": word,
             "meaning": meaning,
@@ -468,7 +466,7 @@ def save_german_word(word, meaning, example_sentence, article=None, plural=None)
             "source": "Netzwerk Neu",
             "created_at": datetime.now(get_timezone()).isoformat()
         }
-        result = requests.post(url, headers=supabase_headers, json=data)
+        result = requests.post(url, headers=supabase_headers, json=data, timeout=10)
 
         if result.status_code in [200, 201, 204]:
             return True
@@ -491,7 +489,7 @@ def save_grammar_rule(topic, note):
             "note": note,
             "created_at": datetime.now(get_timezone()).isoformat()
         }
-        result = requests.post(url, headers=supabase_headers, json=data)
+        result = requests.post(url, headers=supabase_headers, json=data, timeout=10)
 
         if result.status_code in [200, 201, 204]:
             return True
@@ -504,6 +502,21 @@ def save_grammar_rule(topic, note):
     except Exception as e:
         log_system_error("save_grammar_rule", e)
         return False
+
+
+def get_random_german_words(limit=5):
+    try:
+        url = (
+            f"{SUPABASE_URL}/rest/v1/german_words"
+            f"?select=word,meaning,example_sentence,article,plural"
+            f"&order=random()"
+            f"&limit={limit}"
+        )
+        result = requests.get(url, headers=supabase_headers, timeout=10)
+        return result.json() if result.status_code == 200 else []
+    except Exception as e:
+        log_system_error("get_random_german_words", e)
+        return []
 
 
 
@@ -835,7 +848,8 @@ def get_asana_user():
     try:
         response = requests.get(
             "https://app.asana.com/api/1.0/users/me",
-            headers=get_asana_headers()
+            headers=get_asana_headers(),
+            timeout=10
         )
 
         if response.status_code != 200:
@@ -870,7 +884,8 @@ def get_asana_tasks():
         task_response = requests.get(
             "https://app.asana.com/api/1.0/tasks",
             headers=get_asana_headers(),
-            params=params
+            params=params,
+            timeout=10
         )
 
         return json.dumps(task_response.json().get("data", []), indent=2)
@@ -902,7 +917,8 @@ def create_asana_task(task_name):
         response = requests.post(
             "https://app.asana.com/api/1.0/tasks",
             headers=get_asana_headers(content_type=True),
-            json=data
+            json=data,
+            timeout=10
         )
 
         if response.status_code in [200, 201]:
@@ -962,7 +978,11 @@ def format_system_status_dashboard(report):
         "events_log_count": "Conversation logs",
         "personal_memory_count": "Personal memories",
         "semantic_memory_count": "Semantic memories",
-        "finance_transactions_count": "Finance transactions"
+        "finance_transactions_count": "Finance transactions",
+        "german_words_count": "German words",
+        "german_grammar_count": "German grammar",
+        "documents_count": "Uploaded documents",
+        "logs_count": "System logs"
     }
 
     lines = [
@@ -1226,7 +1246,7 @@ def get_recent_system_errors(limit=10):
             f"&order=created_at.desc"
             f"&limit={limit}"
         )
-        result = requests.get(url, headers=supabase_headers)
+        result = requests.get(url, headers=supabase_headers, timeout=10)
 
         if result.status_code != 200:
             return (
@@ -1355,26 +1375,28 @@ def get_system_status():
         "personal_memory_count": "personal_memory",
         "semantic_memory_count": "semantic_memory",
         "finance_transactions_count": "finance_transactions",
-        "vocab_count": "german_vocabulary",
-        "srs_progress_count": "user_vocab_progress",
+        "german_words_count": "german_words",
+        "german_grammar_count": "german_grammar",
         "documents_count": "uploaded_documents",
         "logs_count": "system_logs"
     }
 
     # Check Supabase Connectivity
     try:
-        report["supabase"] = "connected"
         for key, table in checks.items():
-            url = f"{SUPABASE_URL}/rest/v1/{table}?select=id&limit=1"
-            result = requests.get(url, headers=supabase_headers, timeout=5)
-            if result.status_code == 404:
+            # Lightweight check: use Prefer: count=exact and limit=0 to get just the header
+            headers = supabase_headers.copy()
+            headers["Prefer"] = "count=exact"
+            url = f"{SUPABASE_URL}/rest/v1/{table}?select=id&limit=0"
+            res = requests.get(url, headers=headers, timeout=10)
+            
+            if res.status_code == 200:
+                report["supabase"] = "connected"
+                content_range = res.headers.get("content-range")
+                report[key] = int(content_range.split("/")[-1]) if content_range else 0
+            else:
                 report["supabase"] = "partial" # Table missing
                 report[key] = "failed"
-            else:
-                # Fetch count for reporting
-                count_url = f"{SUPABASE_URL}/rest/v1/{table}?select=id"
-                count_res = requests.get(count_url, headers=supabase_headers, timeout=5)
-                report[key] = len(count_res.json()) if count_res.status_code == 200 else "failed"
     except Exception as e:
         log_system_error("get_system_status.database_checks", e)
         report["supabase"] = "failed"
@@ -1718,7 +1740,7 @@ def get_recent_failures(limit=3):
             f"&order=created_at.desc"
             f"&limit={limit}"
         )
-        result = requests.get(url, headers=supabase_headers)
+        result = requests.get(url, headers=supabase_headers, timeout=10)
         if result.status_code != 200:
             return []
 
@@ -2024,13 +2046,37 @@ async def handle_email_draft_flow(update, context, user_message, is_voice_input,
     return False
 
 
+def get_finance_transactions(select_columns):
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/finance_transactions?select={select_columns}"
+        result = requests.get(url, headers=supabase_headers, timeout=10)
+        if result.status_code != 200:
+            return None
+        return result.json()
+    except Exception as e:
+        log_system_error("get_finance_transactions", e)
+        return None
+
+
+def iter_expense_rows(rows):
+    for row in rows:
+        if row.get("transaction_type") != "expense":
+            continue
+        category = row.get("category") or "general"
+        amount = float(row.get("amount") or 0)
+        yield row, category, amount
+
+
+
+
 def get_unsupported_action_reply():
+    """Returns a standard message when an unsupported external action is requested."""
     return (
         "I did not complete that external action.\n"
-        "Only these write actions are currently connected to real APIs: create calendar events, create Gmail drafts, create Asana tasks, save memories, and log finance transactions."
+        "Only these write actions are currently connected to real APIs: "
+        "create calendar events, create Gmail drafts, create Asana tasks, "
+        "save memories, and log finance transactions."
     )
-
-
 def build_live_context(text):
     context_parts = []
 
@@ -2485,9 +2531,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "source": "telegram",
             "page_count": page_count,
             "semantic_chunk_count": len(chunks),
-            "storage_status": "telegram",
-            "extracted_text_summary": truncate_text(text_content, 1000),
-            "local_processing_path": temp_path
+            "storage_status": "processed",
+            "extracted_text_summary": truncate_text(text_content, 1000)
         }
         save_document_metadata(doc_data)
 
