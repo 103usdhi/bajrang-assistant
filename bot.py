@@ -30,6 +30,10 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASANA_TOKEN = os.getenv("ASANA_TOKEN")
 GOOGLE_TOKEN_JSON = os.getenv("GOOGLE_TOKEN_JSON")
+RENDER_API_KEY = os.getenv("RENDER_API_KEY")
+RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO")
 
 ALLOWED_USER_ID = 8106199737
 TIMEZONE_NAME = "Europe/Berlin"
@@ -1243,6 +1247,111 @@ def get_recent_system_errors(limit=10):
         return f"{ICON_CLIPBOARD} Recent System Errors\n\nCould not fetch logs: {str(e)}"
 
 
+def get_render_deploy_status():
+    """Fetches the latest deployment status from Render API."""
+    if not RENDER_API_KEY or not RENDER_SERVICE_ID:
+        return "Render API credentials missing."
+
+    try:
+        url = f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/deploys"
+        headers = {
+            "Authorization": f"Bearer {RENDER_API_KEY}",
+            "Accept": "application/json"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
+            log_system_error("render_status", f"Render API returned {response.status_code}")
+            return f"{ICON_RED} Could not fetch Render status."
+
+        deploys = response.json()
+        if not deploys:
+            return f"{ICON_WHITE} No deployments found."
+
+        # Render returns a list of objects, each containing a 'deploy' key
+        latest = deploys[0]["deploy"]
+        raw_status = latest["status"]
+
+        # Map to requested labels
+        if raw_status == "live":
+            status_label, icon = "live", ICON_GREEN
+        elif raw_status in ["build_failed", "pre_deploy_failed", "canceled"]:
+            status_label, icon = "failed", ICON_RED
+        elif raw_status in ["build_in_progress", "pre_deploy_in_progress", "created"]:
+            status_label, icon = "building", ICON_YELLOW
+        elif raw_status == "update_in_progress":
+            status_label, icon = "deploying", ICON_YELLOW
+        else:
+            status_label, icon = raw_status, ICON_WHITE
+
+        def fmt_time(iso_str):
+            if not iso_str: return "N/A"
+            dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+            return dt.astimezone(get_timezone()).strftime("%Y-%m-%d %H:%M")
+
+        commit_msg = latest.get("commit", {}).get("message", "No message")
+        finished_at = latest.get("finishedAt") or latest.get("updatedAt")
+
+        lines = [
+            f"{ICON_COMPASS} Render Deployment Status",
+            "",
+            f"Deploy ID: `{latest['id']}`",
+            f"Status: {icon} {status_label.capitalize()}",
+            f"Created: {fmt_time(latest['createdAt'])}",
+            f"Finished: {fmt_time(finished_at)}",
+            f"Commit: {truncate_text(commit_msg, 60)}"
+        ]
+        return "\n".join(lines)
+    except Exception as e:
+        log_system_error("render_status", e)
+        return f"{ICON_RED} Render status error: {str(e)}"
+
+
+def get_github_latest_commit():
+    """Fetches the latest commit details from the GitHub repository."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return "GitHub credentials missing."
+
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/commits?sha=main&per_page=1"
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+
+        if response.status_code != 200:
+            log_system_error("github_status", f"GitHub API returned {response.status_code}")
+            return f"{ICON_RED} Could not fetch GitHub status."
+
+        commits = response.json()
+        if not commits:
+            return f"{ICON_WHITE} No commits found."
+
+        commit_obj = commits[0]
+        sha_short = commit_obj["sha"][:7]
+        commit_info = commit_obj["commit"]
+        author_name = commit_info["author"]["name"]
+        message = commit_info["message"]
+        
+        dt = datetime.strptime(commit_info["author"]["date"], "%Y-%m-%dT%H:%M:%SZ")
+        dt = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(get_timezone())
+        timestamp = dt.strftime("%Y-%m-%d %H:%M")
+
+        lines = [
+            f"{ICON_MAGNIFIER} GitHub Latest Push",
+            "",
+            f"Message: {truncate_text(message, 100)}",
+            f"Author: {author_name}",
+            f"SHA: `{sha_short}`",
+            f"Time: {timestamp}"
+        ]
+        return "\n".join(lines)
+    except Exception as e:
+        log_system_error("github_status", e)
+        return f"{ICON_RED} GitHub status error: {str(e)}"
+
+
 def get_system_status():
     report = {}
     report["current_time"] = get_current_datetime()
@@ -1370,6 +1479,7 @@ Output:
 def get_main_menu():
     keyboard = [
         ["System Status", "Show Errors"],
+        ["Deploy Status", "Last Push"],
         ["Daily Briefing"],
         ["Finance Report", "Overspending"],
         ["Gmail Summary", "Calendar Summary"],
@@ -2138,6 +2248,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     if text == "show errors":
         errors = get_recent_system_errors()
         await update.message.reply_text(errors, reply_markup=get_main_menu())
+        return
+
+    if text in ["deploy status", "render status"]:
+        status = get_render_deploy_status()
+        await update.message.reply_text(status, reply_markup=get_main_menu())
+        return
+
+    if text in ["last push", "github status"]:
+        status = get_github_latest_commit()
+        await update.message.reply_text(status, reply_markup=get_main_menu())
         return
 
     if is_email_action_request(text):
