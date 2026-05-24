@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from openai import OpenAI
 from telegram import Update, ReplyKeyboardMarkup
+import pypdf
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -291,7 +292,7 @@ def generate_embedding(text):
     return response.data[0].embedding
 
 
-def save_semantic_memory(content):
+def save_semantic_memory(content, source="telegram"):
     if not openai_client:
         return
 
@@ -300,7 +301,7 @@ def save_semantic_memory(content):
         url = f"{SUPABASE_URL}/rest/v1/semantic_memory"
         data = {
             "content": content,
-            "source": "telegram",
+            "source": source,
             "embedding": embedding
         }
         requests.post(url, headers=supabase_headers, json=data)
@@ -402,13 +403,16 @@ def save_finance_transaction(tx):
         return False
 
 
-def save_german_word(word, meaning, example_sentence):
+def save_german_word(word, meaning, example_sentence, article=None, plural=None):
     try:
-        url = f"{SUPABASE_URL}/rest/v1/german_words"
+        url = f"{SUPABASE_URL}/rest/v1/german_vocabulary"
         data = {
             "word": word,
             "meaning": meaning,
             "example_sentence": example_sentence,
+            "article": article,
+            "plural": plural,
+            "source": "Netzwerk Neu",
             "created_at": datetime.now(get_timezone()).isoformat()
         }
         result = requests.post(url, headers=supabase_headers, json=data)
@@ -1028,8 +1032,10 @@ def format_system_status_dashboard(report):
     return "\n".join(lines)
 
 
-def truncate_text(value, max_length=260):
-    value = str(value or "").replace("\n", " ").strip()
+def truncate_text(value, max_length=260, preserve_newlines=False):
+    value = str(value or "").strip()
+    if not preserve_newlines:
+        value = value.replace("\n", " ")
 
     if len(value) <= max_length:
         return value
@@ -1695,21 +1701,65 @@ def create_gmail_draft_reply(to_email, subject, body):
     )
 
 
-def generate_a1_practice():
+def get_recent_failures(limit=3):
+    """Fetches recent failed quiz attempts for spaced repetition logic."""
     try:
+        url = (
+            f"{SUPABASE_URL}/rest/v1/events_log"
+            f"?select=assistant_response"
+            f"&assistant_response=ilike.*Not%20quite.*"
+            f"&order=created_at.desc"
+            f"&limit={limit}"
+        )
+        result = requests.get(url, headers=supabase_headers)
+        if result.status_code != 200:
+            return []
+
+        failures = []
+        for row in result.json():
+            resp = row.get("assistant_response", "")
+            # Extracts word from "Not quite. <word> means: ..."
+            match = re.search(r"Not quite\. (.*?) means:", resp)
+            if match:
+                failures.append(match.group(1))
+        return failures
+    except Exception as e:
+        log_system_error("get_recent_failures", e)
+        return []
+
+
+def generate_a1_practice():
+    """Generates a dynamic, adaptive Goethe A1 German practice session."""
+    try:
+        # Gather adaptive context
+        recent_words = get_random_german_words(limit=5)
+        weak_areas = search_semantic_memory("German grammar mistakes corrections")
+        recent_failures = get_recent_failures(limit=3)
+
+        # Randomize session structure
+        all_components = [
+            "vocabulary", "grammar", "speaking prompt", "listening simulation",
+            "sentence building", "article practice (der/die/das)", "verb conjugation",
+            "exam mini-dialogue", "schreiben practice", "hören-style multiple choice"
+        ]
+        selected_components = random.sample(all_components, 4)
+        scenarios = ["restaurant", "train station", "doctor", "appointments", "shopping", "introducing yourself"]
+
+        prompt = (
+            f"Scenario Context: {random.choice(scenarios)}\n"
+            f"User Context:\n- Recent vocab: {compact_json(recent_words)}\n"
+            f"- Spaced Repetition (prioritize): {', '.join(recent_failures)}\n"
+            f"- Recurring weak points: {compact_json(weak_areas)}\n\n"
+            f"Tasks to include: {', '.join(selected_components)}\n\n"
+            "Instructions: Act as an adaptive A1 German tutor. Create a high-quality, practical exercise. "
+            "Include one 'Say this aloud' voice-friendly prompt. Use bold and fixed-width formatting. Under 500 tokens."
+        )
+
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=450,
-            system="Create compact Goethe A1 German practice. No long explanations.",
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "Return exactly: 5 vocab words with meanings, "
-                        "3 grammar tips, 2 speaking questions, 1 writing task."
-                    )
-                }
-            ]
+            max_tokens=550,
+            system="You are an adaptive Goethe A1 German Tutor. Focus on short, high-quality, interactive sessions.",
+            messages=[{"role": "user", "content": prompt}]
         )
         return response.content[0].text
     except Exception as e:
@@ -2355,6 +2405,77 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_message(update, context, overridden_text=transcription)
 
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for PDF documents to extract text and process with Claude."""
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+
+    doc = update.message.document
+    if not doc.file_name.lower().endswith('.pdf'):
+        await update.message.reply_text("I currently only support reading PDF files.")
+        return
+
+    status_msg = await update.message.reply_text(f"Reading {doc.file_name}... {ICON_MAGNIFIER}")
+    
+    temp_path = None
+    try:
+        file = await doc.get_file()
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
+            temp_path = tf.name
+        await file.download_to_drive(temp_path)
+
+        # Extract full text from PDF
+        text_content = ""
+        page_count = 0
+        with open(temp_path, "rb") as f:
+            reader = pypdf.PdfReader(f)
+            page_count = len(reader.pages)
+            for page in reader.pages:
+                text_content += page.extract_text() or ""
+
+        if not text_content.strip():
+            await status_msg.edit_text(
+                "I couldn't find any readable text in that PDF. "
+                "It might be a scanned PDF or an image-based PDF."
+            )
+            return
+
+        # Split text into chunks of 8,000 characters
+        chunk_size = 8000
+        chunks = [text_content[i:i + chunk_size] for i in range(0, len(text_content), chunk_size)]
+        
+        await status_msg.edit_text(f"Storing {len(chunks)} chunks in semantic memory...")
+
+        # Store each chunk into semantic_memory
+        for chunk in chunks:
+            save_semantic_memory(chunk, source="pdf")
+
+        # Create a short summary from only the first 2 chunks
+        summary_text = "\n".join(chunks[:2])
+        processing_prompt = (
+            "I have processed a PDF document and stored its full content in my semantic memory. "
+            "Based on the following opening segments, provide a concise overview of what this document is about. "
+            "If it is German A1 learning material, identify the main topics.\n\n"
+            f"Segments:\n{truncate_text(summary_text, 16000, preserve_newlines=True)}"
+        )
+
+        await status_msg.edit_text("Generating summary...")
+        await handle_message(update, context, overridden_text=processing_prompt)
+
+        await update.message.reply_text(
+            f"{ICON_CHECK} PDF Ingestion Complete:\n"
+            f"- Pages: {page_count}\n"
+            f"- Semantic chunks saved: {len(chunks)}"
+        )
+
+    except Exception as e:
+        log_system_error("handle_document", e)
+        await status_msg.edit_text("Failed to process the PDF safely.")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     log_system_error("telegram_error_handler", context.error)
 
@@ -2368,6 +2489,7 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     app.add_error_handler(handle_error)
 
     scheduler = BackgroundScheduler(timezone=TIMEZONE_NAME)
