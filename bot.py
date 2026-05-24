@@ -331,7 +331,7 @@ def save_document_metadata(doc_data):
         result = requests.post(url, headers=supabase_headers, json=doc_data)
         if result.status_code in [200, 201, 204]:
             return True
-        log_system_error("save_document_metadata", RuntimeError(f"Supabase returned {result.status_code}"))
+        log_system_error("save_document_metadata", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
         return False
     except Exception as e:
         log_system_error("save_document_metadata", e)
