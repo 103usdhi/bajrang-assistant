@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from telegram import Update, ReplyKeyboardMarkup
 import pypdf
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import anthropic
@@ -2230,13 +2230,13 @@ async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(temp_path)
 
 
-async def send_voice_reply(update: Update, text: str):
+async def send_voice_reply(update: Update, text: str, max_length: int = 700):
     """Converts text to speech and sends it as a Telegram voice message if allowed."""
     if not openai_client:
         return
 
     # Cost safety: Do not use TTS for long replies
-    if len(text) > 700:
+    if len(text) > max_length:
         return
 
     temp_path = None
@@ -2263,6 +2263,36 @@ async def send_voice_reply(update: Update, text: str):
             os.remove(temp_path)
 
 
+READ_ALOUD_MAX_CHARS = 1200
+READ_ALOUD_USAGE_HINT = "Reply to a text message with /read or 🔊 and I'll read it aloud."
+
+
+async def handle_read_aloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Read the replied-to message aloud via TTS. Manual, on-demand — bypasses the voice-replies toggle."""
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    if not update.message:
+        return
+
+    replied = update.message.reply_to_message
+    source_text = ""
+    if replied:
+        source_text = (replied.text or replied.caption or "").strip()
+
+    if not source_text:
+        await send_clean_reply(update.message, READ_ALOUD_USAGE_HINT)
+        return
+
+    if len(source_text) > READ_ALOUD_MAX_CHARS:
+        await send_clean_reply(
+            update.message,
+            f"That message is too long to read aloud ({len(source_text)} chars, limit {READ_ALOUD_MAX_CHARS})."
+        )
+        return
+
+    await send_voice_reply(update, source_text, max_length=READ_ALOUD_MAX_CHARS)
+
+
 def compact_json(data):
     return json.dumps(data, separators=(",", ":"))
 
@@ -2282,6 +2312,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         return
 
     text = user_message.lower().strip()
+
+    if text == "🔊":
+        await handle_read_aloud(update, context)
+        return
 
     if text == "voice replies on":
         context.user_data["voice_replies_enabled"] = True
@@ -2688,6 +2722,7 @@ def main():
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    app.add_handler(CommandHandler("read", handle_read_aloud))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
