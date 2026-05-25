@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import asyncio
 import logging
 import requests
 import base64
@@ -935,30 +936,37 @@ def create_asana_task(task_name):
 def get_health_indicator(value):
     if value == "operational":
         return f"{ICON_GREEN} Online"
-    if value in ["partial", "degraded"]:
+    if value == "partial":
         return f"{ICON_ORANGE} Partial"
+    if value == "degraded":
+        return f"{ICON_ORANGE} Degraded"
     if value == "timeout":
         return f"{ICON_YELLOW} Timeout"
     if value == "disabled":
         return f"{ICON_WHITE} Disabled"
     if value == "failed":
         return f"{ICON_RED} Failed"
-    if value in ["not_checked", "unavailable"]:
+    if value in ["not_checked", "unavailable", "unknown"]:
         return f"{ICON_WHITE} Not Checked"
-    return f"{ICON_YELLOW} {str(value).capitalize()}"
+    return f"{ICON_WHITE} {str(value).capitalize()}"
 
 
 def format_record_count(value):
     if isinstance(value, int):
         return f"{value:,} records"
 
+    if value == "count_unavailable":
+        return f"{ICON_GREEN} Reachable (count n/a)"
     if value == "failed":
         return f"{ICON_RED} Failed"
-
-    if value in ["not_checked", "unavailable"]:
+    if value == "timeout":
+        return f"{ICON_YELLOW} Timeout"
+    if value == "partial":
+        return f"{ICON_ORANGE} Partial"
+    if value in ["not_checked", "unavailable", "unknown"]:
         return f"{ICON_WHITE} Not Checked"
 
-    return f"{ICON_YELLOW} Unknown"
+    return f"{ICON_WHITE} Unknown"
 
 
 def get_overall_health(report):
@@ -968,11 +976,16 @@ def get_overall_health(report):
         return f"{ICON_RED} CRITICAL - Database Offline"
     if sb_status == "timeout":
         return f"{ICON_YELLOW} TIMEOUT - Supabase Connectivity Degraded"
-    
+    if sb_status in ("degraded", "partial"):
+        return f"{ICON_ORANGE} PARTIAL - Supabase Degraded"
+
     infra_keys = ["claude", "openai_embeddings"]
     infra_failed = [k.capitalize().replace("_embeddings", "") for k in infra_keys if report.get(k) == "failed"]
     if infra_failed:
         return f"{ICON_RED} DEGRADED - {', '.join(infra_failed)} Failed"
+    infra_timeout = [k.capitalize().replace("_embeddings", "") for k in infra_keys if report.get(k) == "timeout"]
+    if infra_timeout:
+        return f"{ICON_YELLOW} TIMEOUT - {', '.join(infra_timeout)} Slow"
 
     # Application Layer / Data Stores
     data_store_keys = [
@@ -980,14 +993,19 @@ def get_overall_health(report):
         "finance_transactions_count", "german_words_count", "german_grammar_count",
         "documents_count", "logs_count"
     ]
-    
+
     if any(report.get(k) == "failed" for k in data_store_keys):
         return f"{ICON_ORANGE} PARTIAL - Data Stores Unavailable"
+    if any(report.get(k) in ("timeout", "partial") for k in data_store_keys):
+        return f"{ICON_ORANGE} PARTIAL - Data Stores Degraded"
 
     app_keys = ["gmail", "calendar", "asana"]
     failed_apps = [k.capitalize() for k in app_keys if report.get(k) == "failed"]
     if failed_apps:
         return f"{ICON_ORANGE} PARTIAL - {', '.join(failed_apps)} Offline"
+    timeout_apps = [k.capitalize() for k in app_keys if report.get(k) == "timeout"]
+    if timeout_apps:
+        return f"{ICON_YELLOW} TIMEOUT - {', '.join(timeout_apps)} Slow"
 
     return f"{ICON_GREEN} OPERATIONAL - Core infrastructure healthy"
 
@@ -1028,24 +1046,32 @@ def format_system_status_dashboard(report):
     for key, label in data_labels.items():
         lines.append(f"{label}: {format_record_count(report.get(key))}")
 
-    failed_services = [
-        label
-        for key, label in [
-            ("supabase", "Supabase"),
-            ("gmail", "Gmail"),
-            ("calendar", "Calendar"),
-            ("asana", "Asana"),
-            ("openai_embeddings", "OpenAI Embeddings"),
-            ("claude", "Claude")
-        ]
-        if report.get(key) == "failed"
+    problem_states = {"failed", "timeout", "degraded", "partial"}
+    service_keys = [
+        ("supabase", "Supabase"),
+        ("gmail", "Gmail"),
+        ("calendar", "Calendar"),
+        ("asana", "Asana"),
+        ("openai_embeddings", "OpenAI Embeddings"),
+        ("claude", "Claude")
     ]
+    attention = [
+        f"{label} ({state})"
+        for key, label in service_keys
+        for state in [report.get(key)]
+        if state in problem_states
+    ]
+    attention.extend(
+        f"{data_labels[key]} ({report.get(key)})"
+        for key in data_labels
+        if report.get(key) in problem_states
+    )
 
-    if failed_services:
+    if attention:
         lines.extend([
             "",
             f"{ICON_WARNING} Attention",
-            "Check: " + ", ".join(failed_services)
+            "Check: " + ", ".join(attention)
         ])
     else:
         lines.extend([
@@ -1502,6 +1528,39 @@ def get_github_latest_commit():
         return f"{ICON_RED} GitHub status error: {str(e)}"
 
 
+def check_table_count(table_name):
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/{table_name}?select=id"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Prefer": "count=exact",
+            "Range": "0-0",
+        }
+        res = requests.get(url, headers=headers, timeout=5)
+
+        if res.status_code not in (200, 206):
+            log_system_error(
+                f"health_check.{table_name}",
+                f"{res.status_code}: {res.text}"
+            )
+            return "failed"
+
+        # HTTP success = table is reachable. Count parsing is a best-effort extra.
+        content_range = res.headers.get("content-range", "")
+        if "/" in content_range:
+            total = content_range.split("/")[-1]
+            if total.isdigit():
+                return int(total)
+        return "count_unavailable"
+
+    except requests.exceptions.Timeout:
+        return "timeout"
+    except Exception as e:
+        log_system_error(f"health_check.{table_name}", e)
+        return "failed"
+
+
 def get_system_status():
     report = {}
     report["current_time"] = get_current_datetime()
@@ -1518,64 +1577,92 @@ def get_system_status():
         "logs_count": "system_logs"
     }
 
-    # Check Supabase Connectivity
+    # 1. Supabase Connectivity and Table Health
+    supabase_overall_status = "operational"
     try:
-        for key, table in checks.items():
-            # Lightweight check: use Prefer: count=exact and limit=0 to get just the header
-            headers = supabase_headers.copy()
-            headers["Prefer"] = "count=exact"
-            url = f"{SUPABASE_URL}/rest/v1/{table}?select=id&limit=0"
-            res = requests.get(url, headers=headers, timeout=10)
-            
-            if res.status_code == 200:
-                report["supabase"] = "connected"
-                content_range = res.headers.get("content-range")
-                report[key] = int(content_range.split("/")[-1]) if content_range else 0
-            else:
-                report["supabase"] = "partial" # Table missing
-                report[key] = "failed"
+        # Test a core table (system_logs) for initial Supabase connectivity.
+        # If this fails we skip per-table probes to avoid amplifying doomed
+        # log writes during an outage.
+        initial_db_check = check_table_count("system_logs")
+        if initial_db_check in ("failed", "timeout"):
+            report["supabase"] = initial_db_check
+            for key in checks:
+                report[key] = "not_checked"
+        else:
+            for key, table in checks.items():
+                result = check_table_count(table)
+                report[key] = result
+                # A reachable table with an unparseable count must NOT poison
+                # the rollup — count_unavailable and ints are both healthy.
+                if result == "failed":
+                    supabase_overall_status = "degraded"
+                elif result == "timeout" and supabase_overall_status != "degraded":
+                    supabase_overall_status = "degraded"
+                elif result == "partial" and supabase_overall_status == "operational":
+                    supabase_overall_status = "partial"
+            report["supabase"] = supabase_overall_status
     except Exception as e:
-        log_system_error("get_system_status.database_checks", e)
+        log_system_error("get_system_status.supabase_critical", e)
         report["supabase"] = "failed"
+        for key in checks:
+            report[key] = "not_checked"
 
+    # 2. External Service Layer (Gmail, Calendar, Asana)
+    # Use structured lightweight probes — never sniff formatted summary text.
     try:
-        report["gmail"] = "connected" if "failed" not in get_gmail_summary().lower() else "failed"
+        creds = get_google_credentials()
+        if not creds:
+            report["gmail"] = "disabled"
+        else:
+            build("gmail", "v1", credentials=creds).users().getProfile(userId="me").execute()
+            report["gmail"] = "operational"
+    except requests.exceptions.Timeout:
+        report["gmail"] = "timeout"
     except Exception as e:
         log_system_error("get_system_status.gmail", e)
-        report["gmail"] = "failed"
+        report["gmail"] = "timeout" if "timeout" in str(e).lower() else "failed"
 
     try:
-        report["calendar"] = "connected" if "failed" not in get_calendar_summary().lower() else "failed"
+        creds = get_google_credentials()
+        if not creds:
+            report["calendar"] = "disabled"
+        else:
+            build("calendar", "v3", credentials=creds).calendarList().list(maxResults=1).execute()
+            report["calendar"] = "operational"
+    except requests.exceptions.Timeout:
+        report["calendar"] = "timeout"
     except Exception as e:
         log_system_error("get_system_status.calendar", e)
-        report["calendar"] = "failed"
+        report["calendar"] = "timeout" if "timeout" in str(e).lower() else "failed"
 
     try:
-        report["asana"] = "connected" if "failed" not in get_asana_tasks().lower() else "failed"
+        if not ASANA_TOKEN:
+            report["asana"] = "disabled"
+        else:
+            report["asana"] = "operational" if get_asana_user() else "failed"
+    except requests.exceptions.Timeout:
+        report["asana"] = "timeout"
     except Exception as e:
         log_system_error("get_system_status.asana", e)
         report["asana"] = "failed"
 
+    # 3. Intelligence Layer (OpenAI, Claude)
     try:
         if openai_client:
-            generate_embedding("test")
-            report["openai_embeddings"] = "connected"
+            openai_client.embeddings.create(model="text-embedding-3-small", input="health_check", timeout=5.0)
+            report["openai_embeddings"] = "operational"
         else:
             report["openai_embeddings"] = "disabled"
     except Exception as e:
-        log_system_error("get_system_status.openai_embeddings", e)
-        report["openai_embeddings"] = "failed"
+        log_system_error("get_system_status.openai", e)
+        report["openai_embeddings"] = "timeout" if "timeout" in str(e).lower() else "failed"
 
     try:
-        client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=10,
-            messages=[{"role": "user", "content": "hello"}]
-        )
-        report["claude"] = "connected"
+        client.messages.create(model=CLAUDE_MODEL, max_tokens=10, messages=[{"role": "user", "content": "health_check"}], timeout=5.0)
+        report["claude"] = "operational"
     except Exception as e:
         log_system_error("get_system_status.claude", e)
-        report["claude"] = "failed"
+        report["claude"] = "timeout" if "timeout" in str(e).lower() else "failed"
 
     return format_system_status_dashboard(report)
 
@@ -2602,7 +2689,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     # System status
     if text == "system status":
-        status = get_system_status()
+        status = await asyncio.to_thread(get_system_status)
         await send_clean_reply(update.message,status)
         return
 
