@@ -144,6 +144,7 @@ FINANCE_CONTEXT_KEYWORDS = [
 ]
 
 ICON_GREEN = "\U0001f7e2"
+ICON_ORANGE = "\U0001f7e0"
 ICON_YELLOW = "\U0001f7e1"
 ICON_RED = "\U0001f534"
 ICON_WHITE = "\u26aa"
@@ -932,16 +933,19 @@ def create_asana_task(task_name):
 
 
 def get_health_indicator(value):
-    if value == "connected":
+    if value == "operational":
         return f"{ICON_GREEN} Online"
-
+    if value in ["partial", "degraded"]:
+        return f"{ICON_ORANGE} Partial"
+    if value == "timeout":
+        return f"{ICON_YELLOW} Timeout"
     if value == "disabled":
         return f"{ICON_WHITE} Disabled"
-
     if value == "failed":
         return f"{ICON_RED} Failed"
-
-    return f"{ICON_YELLOW} Unknown"
+    if value in ["not_checked", "unavailable"]:
+        return f"{ICON_WHITE} Not Checked"
+    return f"{ICON_YELLOW} {str(value).capitalize()}"
 
 
 def format_record_count(value):
@@ -949,36 +953,50 @@ def format_record_count(value):
         return f"{value:,} records"
 
     if value == "failed":
-        return f"{ICON_RED} Unavailable"
+        return f"{ICON_RED} Failed"
+
+    if value in ["not_checked", "unavailable"]:
+        return f"{ICON_WHITE} Not Checked"
 
     return f"{ICON_YELLOW} Unknown"
 
 
 def get_overall_health(report):
-    service_keys = [
-        "supabase",
-        "gmail",
-        "calendar",
-        "asana",
-        "openai_embeddings",
-        "claude"
+    # Core Infrastructure
+    sb_status = report.get("supabase")
+    if sb_status == "failed":
+        return f"{ICON_RED} CRITICAL - Database Offline"
+    if sb_status == "timeout":
+        return f"{ICON_YELLOW} TIMEOUT - Supabase Connectivity Degraded"
+    
+    infra_keys = ["claude", "openai_embeddings"]
+    infra_failed = [k.capitalize().replace("_embeddings", "") for k in infra_keys if report.get(k) == "failed"]
+    if infra_failed:
+        return f"{ICON_RED} DEGRADED - {', '.join(infra_failed)} Failed"
+
+    # Application Layer / Data Stores
+    data_store_keys = [
+        "events_log_count", "personal_memory_count", "semantic_memory_count",
+        "finance_transactions_count", "german_words_count", "german_grammar_count",
+        "documents_count", "logs_count"
     ]
-    services = [report.get(key) for key in service_keys]
+    
+    if any(report.get(k) == "failed" for k in data_store_keys):
+        return f"{ICON_ORANGE} PARTIAL - Data Stores Unavailable"
 
-    if any(status == "failed" for status in services):
-        return f"{ICON_RED} Attention needed"
+    app_keys = ["gmail", "calendar", "asana"]
+    failed_apps = [k.capitalize() for k in app_keys if report.get(k) == "failed"]
+    if failed_apps:
+        return f"{ICON_ORANGE} PARTIAL - {', '.join(failed_apps)} Offline"
 
-    if any(status == "disabled" for status in services):
-        return f"{ICON_YELLOW} Partially operational"
-
-    return f"{ICON_GREEN} All systems operational"
+    return f"{ICON_GREEN} OPERATIONAL - Core infrastructure healthy"
 
 
 def format_system_status_dashboard(report):
     data_labels = {
         "events_log_count": "Conversation logs",
-        "personal_memory_count": "Personal memories",
-        "semantic_memory_count": "Semantic memories",
+        "personal_memory_count": "Personal memory",
+        "semantic_memory_count": "Semantic memory",
         "finance_transactions_count": "Finance transactions",
         "german_words_count": "German words",
         "german_grammar_count": "German grammar",
@@ -1174,7 +1192,8 @@ def format_log_time(value):
         clean_value = value.replace("Z", "+00:00")
         logged_at = datetime.fromisoformat(clean_value)
         return logged_at.strftime("%Y-%m-%d %H:%M")
-    except Exception:
+    except Exception as e:
+        logging.warning("Failed to format log time '%s': %s", value, e)
         return str(value)
 
 
@@ -1184,7 +1203,8 @@ def parse_log_datetime(value):
 
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except Exception:
+    except Exception as e:
+        logging.warning("Failed to parse datetime '%s': %s", value, e)
         return None
 
 
