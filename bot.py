@@ -12,9 +12,10 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TimedOut
 import pypdf
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import anthropic
@@ -2064,7 +2065,7 @@ async def handle_german_correction_flow(update, context, user_message, is_voice_
         context.user_data.pop(WAITING_FOR_GERMAN_CORRECTION, None)
         reply = correct_german_text(user_message)
         save_to_supabase("Correct My German", reply)
-        await send_clean_reply(update.message,reply, reply_markup=get_german_a1_menu())
+        await send_clean_reply(update.message, reply, reply_markup=get_read_aloud_markup())
         if is_voice_input and voice_replies_enabled:
             await send_voice_reply(update, reply)
         return True
@@ -2254,8 +2255,14 @@ async def send_voice_reply(update: Update, text: str, max_length: int = 700):
             temp_path = tf.name
         response.stream_to_file(temp_path)
 
+        target_message = update.effective_message
+        if target_message is None:
+            return
         with open(temp_path, "rb") as voice_fh:
-            await update.message.reply_voice(voice=voice_fh)
+            try:
+                await target_message.reply_voice(voice=voice_fh)
+            except TimedOut as e:
+                log_system_error("voice_tts_timeout", e)
     except Exception as e:
         log_system_error("voice_tts", e)
     finally:
@@ -2265,6 +2272,55 @@ async def send_voice_reply(update: Update, text: str, max_length: int = 700):
 
 READ_ALOUD_MAX_CHARS = 1200
 READ_ALOUD_USAGE_HINT = "Reply to a text message with /read or 🔊 and I'll read it aloud."
+READ_ALOUD_CALLBACK = "tts_read"
+
+
+def get_read_aloud_markup():
+    """Inline keyboard with a single 🔊 Read Aloud button for attaching to bot replies."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔊 Read Aloud", callback_data=READ_ALOUD_CALLBACK)
+    ]])
+
+
+async def handle_tts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback handler for the inline 🔊 Read Aloud button."""
+    query = update.callback_query
+    if not query:
+        return
+    if update.effective_user.id != ALLOWED_USER_ID:
+        try:
+            await query.answer()
+        except TimedOut as e:
+            log_system_error("handle_tts_callback", e)
+        return
+
+    source_text = ""
+    if query.message:
+        source_text = (query.message.text or query.message.caption or "").strip()
+
+    if not source_text:
+        try:
+            await query.answer(text="No text to read aloud.", show_alert=True)
+        except TimedOut as e:
+            log_system_error("handle_tts_callback", e)
+        return
+
+    if len(source_text) > READ_ALOUD_MAX_CHARS:
+        try:
+            await query.answer(
+                text=f"Too long to read aloud (limit {READ_ALOUD_MAX_CHARS} chars).",
+                show_alert=True
+            )
+        except TimedOut as e:
+            log_system_error("handle_tts_callback", e)
+        return
+
+    try:
+        await query.answer()
+    except TimedOut as e:
+        log_system_error("handle_tts_callback", e)
+
+    await send_voice_reply(update, source_text, max_length=READ_ALOUD_MAX_CHARS)
 
 
 async def handle_read_aloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2475,7 +2531,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     if text == "a1 practice":
         reply = generate_a1_practice()
         save_to_supabase(user_message, reply)
-        await send_clean_reply(update.message,reply, reply_markup=get_german_a1_menu())
+        await send_clean_reply(update.message, reply, reply_markup=get_read_aloud_markup())
         if is_voice_input and voice_replies_enabled:
             await send_voice_reply(update, reply)
         return
@@ -2605,7 +2661,7 @@ Timezone: {TIMEZONE_NAME}
 
     reply = response.content[0].text
     save_to_supabase(user_message, reply)
-    await send_clean_reply(update.message,reply)
+    await send_clean_reply(update.message, reply, reply_markup=get_read_aloud_markup())
     if is_voice_input and voice_replies_enabled:
         await send_voice_reply(update, reply)
 
@@ -2723,6 +2779,7 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("read", handle_read_aloud))
+    app.add_handler(CallbackQueryHandler(handle_tts_callback, pattern=f"^{READ_ALOUD_CALLBACK}$"))
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
