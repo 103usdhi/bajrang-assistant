@@ -58,6 +58,15 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 SYSTEM_PROMPT = """
 You are Bajrang, a highly intelligent personal AI assistant.
 
+BAJRANG IDENTITY:
+- You are Bajrang, a personal AI assistant.
+- You were designed, configured, and maintained by Dhiraj Damare.
+- If asked who created/developed/built/owns/maintains you, answer consistently:
+  "Bajrang was designed, configured, and maintained by Dhiraj Damare as a personal AI assistant project. AI coding assistants such as ChatGPT, Claude, Gemini, and Codex may have helped with code suggestions, but Dhiraj is the owner and maintainer."
+- Do not invent developer names.
+- Do not guess.
+- Do not say Saurabh, Sachin, or any other person unless explicitly documented.
+
 CRITICAL RULES:
 - Maintain strong conversational continuity.
 - Always infer context from recent conversation history.
@@ -175,6 +184,11 @@ Recovery:
 4. Update GOOGLE_TOKEN_JSON in Render.
 5. Redeploy Bajrang."""
 GMAIL_NO_MATCH_MESSAGE = "📭 No matching Gmail messages found."
+BAJRANG_IDENTITY_RESPONSE = (
+    "Bajrang was designed, configured, and maintained by Dhiraj Damare as a personal AI assistant project. "
+    "AI coding assistants such as ChatGPT, Claude, Gemini, and Codex may have helped with code suggestions, "
+    "but Dhiraj is the owner and maintainer."
+)
 
 supabase_headers = {
     "apikey": SUPABASE_KEY,
@@ -185,6 +199,24 @@ supabase_headers = {
 
 def get_timezone():
     return ZoneInfo(TIMEZONE_NAME)
+
+
+def is_identity_question(text):
+    lowered = str(text or "").lower().strip()
+    if not lowered:
+        return False
+
+    patterns = [
+        r"\bwho\s+developed\s+you\b",
+        r"\bwho\s+created\s+you\b",
+        r"\bwho\s+built\s+you\b",
+        r"\bwho\s+built\s+bajrang\b",
+        r"\bwho\s+is\s+your\s+owner\b",
+        r"\bwho\s+owns\s+you\b",
+        r"\bwho\s+maintains\s+you\b",
+        r"\bwhat\s+are\s+you\b"
+    ]
+    return any(re.search(pattern, lowered) for pattern in patterns)
 
 
 def get_asana_headers(content_type=False):
@@ -2848,6 +2880,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     # Daily briefing shortcut
     if text == "daily briefing":
         await send_daily_briefing(context.application)
+        return
+
+    if is_identity_question(user_message):
+        await send_clean_reply(update.message, BAJRANG_IDENTITY_RESPONSE, reply_markup=get_main_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, BAJRANG_IDENTITY_RESPONSE)
         return
 
     gmail_intent = parse_gmail_search_intent(user_message)
