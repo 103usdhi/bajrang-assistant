@@ -23,6 +23,8 @@ import anthropic
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 
 load_dotenv()
 
@@ -629,7 +631,22 @@ def get_google_credentials(required_scopes=None):
                 )
                 return None
 
-        return Credentials.from_authorized_user_info(token_data)
+        creds = Credentials.from_authorized_user_info(token_data)
+
+        # If credentials are expired but have a refresh token, try to refresh them.
+        try:
+            if getattr(creds, "expired", False) and getattr(creds, "refresh_token", None):
+                creds.refresh(Request())
+        except RefreshError as e:
+            # Refresh failed - likely revoked or invalid refresh token
+            log_system_error("get_google_credentials", e)
+            return None
+        except Exception as e:
+            # Any other refresh-related error
+            log_system_error("get_google_credentials", e)
+            return None
+
+        return creds
     except Exception as e:
         log_system_error("get_google_credentials", e)
         return None
