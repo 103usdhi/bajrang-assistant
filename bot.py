@@ -33,7 +33,8 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
+SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASANA_TOKEN = os.getenv("ASANA_TOKEN")
 GOOGLE_TOKEN_JSON = os.getenv("GOOGLE_TOKEN_JSON")
@@ -214,6 +215,89 @@ supabase_headers = {
     "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type": "application/json"
 }
+finance_auth_warning_emitted = False
+
+
+def get_supabase_key_role(jwt_token):
+    token = str(jwt_token or "").strip()
+    if not token or "." not in token:
+        return None
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload = parts[1]
+        padding = "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode((payload + padding).encode("utf-8"))
+        payload_data = json.loads(decoded.decode("utf-8"))
+        return payload_data.get("role")
+    except Exception:
+        return None
+
+
+def has_finance_write_access():
+    if SUPABASE_SERVICE_ROLE_KEY:
+        return get_supabase_key_role(SUPABASE_SERVICE_ROLE_KEY) == "service_role"
+    role = get_supabase_key_role(SUPABASE_KEY)
+    return role == "service_role"
+
+
+def get_finance_auth_error_message():
+    return (
+        "Finance writes require service-role credentials.\n"
+        "Set SUPABASE_SERVICE_ROLE_KEY in Render Environment and redeploy."
+    )
+
+
+def get_finance_supabase_headers():
+    global finance_auth_warning_emitted
+
+    finance_key = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY
+    if not finance_key:
+        if not finance_auth_warning_emitted:
+            logging.error("Finance Supabase key is missing. Set SUPABASE_SERVICE_ROLE_KEY.")
+            finance_auth_warning_emitted = True
+        return supabase_headers
+
+    if not SUPABASE_SERVICE_ROLE_KEY and not finance_auth_warning_emitted:
+        role = get_supabase_key_role(SUPABASE_KEY)
+        logging.warning(
+            "Finance writes are using SUPABASE_KEY because SUPABASE_SERVICE_ROLE_KEY is not set. "
+            "Finance tables are service_role-only. Detected SUPABASE_KEY role=%s",
+            role
+        )
+        finance_auth_warning_emitted = True
+
+    return {
+        "apikey": finance_key,
+        "Authorization": f"Bearer {finance_key}",
+        "Content-Type": "application/json"
+    }
+
+
+def log_finance_auth_configuration():
+    supabase_role = get_supabase_key_role(SUPABASE_KEY)
+    service_role = get_supabase_key_role(SUPABASE_SERVICE_ROLE_KEY) if SUPABASE_SERVICE_ROLE_KEY else None
+    selected_role = service_role if SUPABASE_SERVICE_ROLE_KEY else supabase_role
+    logging.info(
+        "Finance auth config: SUPABASE_KEY role=%s, SUPABASE_SERVICE_ROLE_KEY present=%s role=%s, selected role=%s",
+        supabase_role,
+        bool(SUPABASE_SERVICE_ROLE_KEY),
+        service_role,
+        selected_role
+    )
+
+
+def log_finance_supabase_http_error(module, table, operation, response):
+    body = (response.text or "").strip()
+    body = body[:700] if body else "(empty body)"
+    log_system_error(
+        module,
+        RuntimeError(
+            f"Supabase finance error table={table} operation={operation} "
+            f"status={response.status_code} body={body}"
+        )
+    )
 
 
 def get_timezone():
@@ -739,22 +823,31 @@ def clear_finance_states(context):
 
 def save_financial_profile_values(values):
     try:
+        if not has_finance_write_access():
+            log_system_error("save_financial_profile_values", RuntimeError(get_finance_auth_error_message()))
+            return False
         payload = {
             "user_id": ALLOWED_USER_ID,
             "updated_at": datetime.now(get_timezone()).isoformat()
         }
         payload.update(values)
-        headers = dict(supabase_headers)
+        headers = dict(get_finance_supabase_headers())
         headers["Prefer"] = "resolution=merge-duplicates,return=representation"
         result = requests.post(
             f"{SUPABASE_URL}/rest/v1/financial_profile",
             headers=headers,
+            params={"on_conflict": "user_id"},
             json=payload,
             timeout=10
         )
         if result.status_code in [200, 201, 204]:
             return True
-        log_system_error("save_financial_profile_values", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        log_finance_supabase_http_error(
+            "save_financial_profile_values",
+            "financial_profile",
+            "upsert",
+            result
+        )
         return False
     except Exception as e:
         log_system_error("save_financial_profile_values", e)
@@ -763,6 +856,9 @@ def save_financial_profile_values(values):
 
 def insert_financial_commitment(payload):
     try:
+        if not has_finance_write_access():
+            log_system_error("insert_financial_commitment", RuntimeError(get_finance_auth_error_message()))
+            return False
         data = {
             "user_id": ALLOWED_USER_ID,
             "created_at": datetime.now(get_timezone()).isoformat(),
@@ -772,13 +868,18 @@ def insert_financial_commitment(payload):
         data.update(payload)
         result = requests.post(
             f"{SUPABASE_URL}/rest/v1/financial_commitments",
-            headers=supabase_headers,
+            headers=get_finance_supabase_headers(),
             json=data,
             timeout=10
         )
         if result.status_code in [200, 201, 204]:
             return True
-        log_system_error("insert_financial_commitment", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        log_finance_supabase_http_error(
+            "insert_financial_commitment",
+            "financial_commitments",
+            "insert",
+            result
+        )
         return False
     except Exception as e:
         log_system_error("insert_financial_commitment", e)
@@ -787,6 +888,9 @@ def insert_financial_commitment(payload):
 
 def insert_financial_goal(payload):
     try:
+        if not has_finance_write_access():
+            log_system_error("insert_financial_goal", RuntimeError(get_finance_auth_error_message()))
+            return False
         data = {
             "user_id": ALLOWED_USER_ID,
             "created_at": datetime.now(get_timezone()).isoformat(),
@@ -796,13 +900,18 @@ def insert_financial_goal(payload):
         data.update(payload)
         result = requests.post(
             f"{SUPABASE_URL}/rest/v1/financial_goals",
-            headers=supabase_headers,
+            headers=get_finance_supabase_headers(),
             json=data,
             timeout=10
         )
         if result.status_code in [200, 201, 204]:
             return True
-        log_system_error("insert_financial_goal", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        log_finance_supabase_http_error(
+            "insert_financial_goal",
+            "financial_goals",
+            "insert",
+            result
+        )
         return False
     except Exception as e:
         log_system_error("insert_financial_goal", e)
@@ -811,6 +920,9 @@ def insert_financial_goal(payload):
 
 def insert_financial_plan(payload):
     try:
+        if not has_finance_write_access():
+            log_system_error("insert_financial_plan", RuntimeError(get_finance_auth_error_message()))
+            return False
         data = {
             "user_id": ALLOWED_USER_ID,
             "created_at": datetime.now(get_timezone()).isoformat(),
@@ -820,13 +932,18 @@ def insert_financial_plan(payload):
         data.update(payload)
         result = requests.post(
             f"{SUPABASE_URL}/rest/v1/financial_plans",
-            headers=supabase_headers,
+            headers=get_finance_supabase_headers(),
             json=data,
             timeout=10
         )
         if result.status_code in [200, 201, 204]:
             return True
-        log_system_error("insert_financial_plan", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        log_finance_supabase_http_error(
+            "insert_financial_plan",
+            "financial_plans",
+            "insert",
+            result
+        )
         return False
     except Exception as e:
         log_system_error("insert_financial_plan", e)
@@ -843,13 +960,18 @@ def fetch_finance_rows(table_name, select_columns="*", limit=50):
         }
         result = requests.get(
             f"{SUPABASE_URL}/rest/v1/{table_name}",
-            headers=supabase_headers,
+            headers=get_finance_supabase_headers(),
             params=params,
             timeout=10
         )
         if result.status_code == 200:
             return result.json()
-        log_system_error("fetch_finance_rows", RuntimeError(f"{table_name} returned {result.status_code}: {result.text}"))
+        log_finance_supabase_http_error(
+            "fetch_finance_rows",
+            table_name,
+            "select",
+            result
+        )
         return []
     except Exception as e:
         log_system_error("fetch_finance_rows", e)
@@ -957,6 +1079,9 @@ def build_finance_item_catalog():
 
 def update_finance_item_amount(item, amount):
     try:
+        if not has_finance_write_access():
+            log_system_error("update_finance_item_amount", RuntimeError(get_finance_auth_error_message()))
+            return False
         if item["table"] == "financial_profile":
             payload = {
                 item["field"]: amount,
@@ -971,14 +1096,19 @@ def update_finance_item_amount(item, amount):
         }
         result = requests.patch(
             f"{SUPABASE_URL}/rest/v1/{item['table']}",
-            headers=supabase_headers,
+            headers=get_finance_supabase_headers(),
             params=params,
             json=payload,
             timeout=10
         )
         if result.status_code in [200, 204]:
             return True
-        log_system_error("update_finance_item_amount", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        log_finance_supabase_http_error(
+            "update_finance_item_amount",
+            item["table"],
+            "update",
+            result
+        )
         return False
     except Exception as e:
         log_system_error("update_finance_item_amount", e)
@@ -987,18 +1117,26 @@ def update_finance_item_amount(item, amount):
 
 def delete_finance_item(item):
     try:
+        if not has_finance_write_access():
+            log_system_error("delete_finance_item", RuntimeError(get_finance_auth_error_message()))
+            return False
         if item["table"] == "financial_profile":
             return save_financial_profile_values({item["field"]: None})
 
         result = requests.delete(
             f"{SUPABASE_URL}/rest/v1/{item['table']}",
-            headers=supabase_headers,
+            headers=get_finance_supabase_headers(),
             params={"id": f"eq.{item['id']}"},
             timeout=10
         )
         if result.status_code in [200, 204]:
             return True
-        log_system_error("delete_finance_item", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        log_finance_supabase_http_error(
+            "delete_finance_item",
+            item["table"],
+            "delete",
+            result
+        )
         return False
     except Exception as e:
         log_system_error("delete_finance_item", e)
@@ -3139,6 +3277,15 @@ def get_finance_confirmation_menu():
 def execute_finance_pending_action(pending):
     action = pending.get("action")
     payload = pending.get("payload", {})
+    if action in {
+        "save_profile_value",
+        "save_commitment",
+        "save_goal",
+        "save_plan",
+        "edit_item_amount",
+        "delete_item"
+    } and not has_finance_write_access():
+        return False, get_finance_auth_error_message()
 
     if action == "save_profile_value":
         ok = save_financial_profile_values(payload)
@@ -4161,6 +4308,7 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     print("Bajrang is starting...")
+    log_finance_auth_configuration()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
