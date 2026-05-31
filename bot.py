@@ -606,6 +606,7 @@ def get_google_credentials(required_scopes=None):
     required_scopes = required_scopes or []
 
     if not GOOGLE_TOKEN_JSON:
+        logging.warning("get_google_credentials: GOOGLE_TOKEN_JSON missing or empty.")
         if required_scopes:
             log_system_error(
                 "get_google_credentials",
@@ -614,7 +615,13 @@ def get_google_credentials(required_scopes=None):
         return None
 
     try:
+        logging.info("get_google_credentials: attempting GOOGLE_TOKEN_JSON parse.")
         token_data = json.loads(GOOGLE_TOKEN_JSON)
+        logging.info(
+            "get_google_credentials: token parsed. keys=%s refresh_token_present=%s",
+            ",".join(sorted(token_data.keys())),
+            bool(token_data.get("refresh_token"))
+        )
 
         if required_scopes:
             available_scopes = get_google_token_scopes(token_data)
@@ -632,22 +639,41 @@ def get_google_credentials(required_scopes=None):
                 return None
 
         creds = Credentials.from_authorized_user_info(token_data)
+        logging.info(
+            "get_google_credentials: creds state before refresh valid=%s expired=%s refresh_token_present=%s",
+            getattr(creds, "valid", None),
+            getattr(creds, "expired", None),
+            bool(getattr(creds, "refresh_token", None))
+        )
 
         # If credentials are expired but have a refresh token, try to refresh them.
         try:
             if getattr(creds, "expired", False) and getattr(creds, "refresh_token", None):
+                logging.info("get_google_credentials: credentials expired, attempting refresh.")
                 creds.refresh(Request())
+                logging.info(
+                    "get_google_credentials: refresh completed valid=%s expired=%s",
+                    getattr(creds, "valid", None),
+                    getattr(creds, "expired", None)
+                )
+            elif getattr(creds, "expired", False) and not getattr(creds, "refresh_token", None):
+                logging.warning(
+                    "get_google_credentials: credentials expired but refresh_token is missing."
+                )
         except RefreshError as e:
             # Refresh failed - likely revoked or invalid refresh token
+            logging.error("get_google_credentials: RefreshError during refresh: %s", str(e))
             log_system_error("get_google_credentials", e)
             return None
         except Exception as e:
             # Any other refresh-related error
+            logging.error("get_google_credentials: non-RefreshError during refresh: %s", str(e))
             log_system_error("get_google_credentials", e)
             return None
 
         return creds
     except Exception as e:
+        logging.error("get_google_credentials: parsing/build failed: %s", str(e))
         log_system_error("get_google_credentials", e)
         return None
 
