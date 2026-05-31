@@ -142,6 +142,7 @@ GERMAN_QUIZ_STATE = "german_quiz"
 MENU_COMMANDS = {"menu", "start", "help"}
 BACK_COMMANDS = {"back", "main menu"}
 GERMAN_MENU_COMMANDS = {"german a1", "german", "german learning"}
+FINANCE_MENU_COMMANDS = {"finance setup", "finance foundation"}
 ADD_GERMAN_WORD_COMMANDS = {"add word", "add german word"}
 ADD_GRAMMAR_RULE_COMMANDS = {"grammar", "add grammar rule"}
 CORRECT_GERMAN_COMMANDS = {"correct german", "correct my german"}
@@ -189,6 +190,24 @@ BAJRANG_IDENTITY_RESPONSE = (
     "AI coding assistants such as ChatGPT, Claude, Gemini, and Codex may have helped with code suggestions, "
     "but Dhiraj is the owner and maintainer."
 )
+FINANCE_FLOW_STATE = "finance_flow_state"
+FINANCE_PENDING_CONFIRM = "finance_pending_confirm"
+FINANCE_EDIT_DELETE_STATE = "finance_edit_delete_state"
+
+FINANCE_BTN_SETUP = "Finance Setup"
+FINANCE_BTN_SET_SALARY = "Set Monthly Salary"
+FINANCE_BTN_SET_RENT = "Set Rent"
+FINANCE_BTN_ADD_EMI = "Add EMI / Loan"
+FINANCE_BTN_ADD_BILL = "Add Recurring Bill"
+FINANCE_BTN_ADD_GOAL = "Add Savings Goal"
+FINANCE_BTN_ADD_PLAN = "Add Future Plan"
+FINANCE_BTN_VIEW_PROFILE = "View Finance Profile"
+FINANCE_BTN_EDIT_DELETE = "Edit/Delete Finance Item"
+
+FINANCE_CONFIRM_SAVE = "✅ Save"
+FINANCE_CONFIRM_EDIT = "✏️ Edit"
+FINANCE_CONFIRM_CANCEL = "❌ Cancel"
+FINANCE_ACTION_DELETE = "🗑 Delete"
 
 supabase_headers = {
     "apikey": SUPABASE_KEY,
@@ -503,6 +522,486 @@ def save_finance_transaction(tx):
         return False
     except Exception as e:
         log_system_error("save_finance_transaction", e)
+        return False
+
+
+def _parse_finance_amount_legacy(text):
+    cleaned = str(text or "").strip().lower()
+    cleaned = cleaned.replace("eur", "").replace("€", "")
+    cleaned = cleaned.replace(",", ".")
+    match = re.search(r"(-?\d+(?:\.\d{1,2})?)", cleaned)
+    if not match:
+        return None
+    try:
+        value = float(match.group(1))
+        if value <= 0:
+            return None
+        return round(value, 2)
+    except Exception:
+        return None
+
+
+def parse_finance_amount(text):
+    """
+    Locale-safe parsing examples:
+    - 1,200 -> 1200.00
+    - 1.200 -> 1200.00
+    - 1,200.50 -> 1200.50
+    - 1.200,50 -> 1200.50
+    """
+
+    def normalize_amount_token(token):
+        candidate = token.strip().strip(".,")
+        if not candidate:
+            return None
+
+        if "," in candidate and "." in candidate:
+            # Last separator is treated as decimal separator.
+            if candidate.rfind(",") > candidate.rfind("."):
+                return candidate.replace(".", "").replace(",", ".")
+            return candidate.replace(",", "")
+
+        if "," in candidate:
+            parts = candidate.split(",")
+            if len(parts) == 2:
+                left, right = parts
+                if len(right) == 3 and left:
+                    return left + right
+                if 1 <= len(right) <= 2:
+                    return left + "." + right
+            return "".join(parts)
+
+        if "." in candidate:
+            parts = candidate.split(".")
+            if len(parts) == 2:
+                left, right = parts
+                if len(right) == 3 and left:
+                    return left + right
+                if 1 <= len(right) <= 2:
+                    return left + "." + right
+            return "".join(parts)
+
+        return candidate
+
+    cleaned = str(text or "").strip().lower()
+    cleaned = cleaned.replace("eur", "").replace("€", "").replace("â‚¬", "")
+    cleaned = cleaned.replace(" ", "").replace("\u00a0", "")
+
+    match = re.search(r"-?\d[\d.,]*", cleaned)
+    if not match:
+        return None
+
+    normalized = normalize_amount_token(match.group(0))
+    if not normalized:
+        return None
+
+    try:
+        value = float(normalized)
+        if value <= 0:
+            return None
+        return round(value, 2)
+    except Exception:
+        return None
+
+
+def format_eur(amount):
+    try:
+        value = float(amount or 0)
+    except Exception:
+        value = 0.0
+    return f"EUR {value:,.2f}".replace(",", " ")
+
+
+def parse_plan_month(text):
+    lowered = str(text or "").lower().strip()
+    if not lowered:
+        return None
+
+    now = datetime.now(get_timezone())
+    if "next month" in lowered:
+        month = now.month + 1
+        year = now.year
+        if month > 12:
+            month = 1
+            year += 1
+        return f"{year:04d}-{month:02d}"
+
+    month_map = {
+        "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12
+    }
+    for month_name, month_number in month_map.items():
+        if month_name in lowered:
+            year_match = re.search(r"\b(20\d{2})\b", lowered)
+            year = int(year_match.group(1)) if year_match else now.year
+            if not year_match and month_number < now.month:
+                year += 1
+            return f"{year:04d}-{month_number:02d}"
+
+    iso_match = re.search(r"\b(20\d{2})-(0[1-9]|1[0-2])\b", lowered)
+    if iso_match:
+        return f"{iso_match.group(1)}-{iso_match.group(2)}"
+
+    return None
+
+
+def parse_future_plan_text(text):
+    raw = str(text or "").strip()
+    lowered = raw.lower()
+    amount = parse_finance_amount(raw)
+    planned_month = parse_plan_month(raw)
+
+    plan_type = "planned_expense"
+    if "refund" in lowered:
+        plan_type = "expected_refund"
+    elif "invest" in lowered:
+        plan_type = "investment"
+    elif "buy" in lowered or "purchase" in lowered:
+        plan_type = "purchase"
+
+    return {
+        "title": raw,
+        "plan_type": plan_type,
+        "planned_amount": amount,
+        "planned_month": planned_month
+    }
+
+
+def is_critical_finance_capture_request(text):
+    lowered = str(text or "").lower()
+    has_number = bool(re.search(r"\b\d[\d.,]*\b", lowered))
+    if not has_number:
+        return False
+
+    critical_words = (
+        "salary", "rent", "emi", "loan", "recurring bill",
+        "savings goal", "financial goal", "future plan"
+    )
+    if any(word in lowered for word in critical_words):
+        return True
+
+    month_names = (
+        "january", "february", "march", "april", "may", "june",
+        "july", "august", "september", "october", "november", "december"
+    )
+    future_plan_markers = (
+        "invest",
+        "investment",
+        "buy",
+        "purchase",
+        "refund",
+        "expected income",
+        "expected payment",
+        "next month",
+        "planned",
+        "goal",
+        "save for"
+    )
+    finance_context_markers = (
+        "finance", "money", "income", "payment", "salary", "rent",
+        "emi", "loan", "bill", "invest", "buy", "purchase", "refund", "goal", "save"
+    )
+
+    has_month_signal = "next month" in lowered or any(month in lowered for month in month_names)
+    has_future_signal = any(marker in lowered for marker in future_plan_markers) or has_month_signal
+    has_finance_context = any(marker in lowered for marker in finance_context_markers) or "€" in str(text or "") or "eur" in lowered
+
+    return has_future_signal and has_finance_context
+
+
+def is_finance_profile_question(text):
+    lowered = str(text or "").lower().strip()
+    if not lowered:
+        return False
+    finance_targets = (
+        "finance profile", "my salary", "my rent", "emi", "loan", "commitment",
+        "savings goal", "future plan", "upcoming obligations", "fixed commitments"
+    )
+    action_words = ("show", "view", "what", "how much", "list", "summary", "profile")
+    return any(target in lowered for target in finance_targets) and any(word in lowered for word in action_words)
+
+
+def set_finance_pending_confirmation(context, action, payload, summary, edit_state=None, edit_prompt=None):
+    context.user_data[FINANCE_PENDING_CONFIRM] = {
+        "action": action,
+        "payload": payload,
+        "summary": summary,
+        "edit_state": edit_state,
+        "edit_prompt": edit_prompt or "Please update the value."
+    }
+
+
+def clear_finance_states(context):
+    context.user_data.pop(FINANCE_FLOW_STATE, None)
+    context.user_data.pop(FINANCE_PENDING_CONFIRM, None)
+    context.user_data.pop(FINANCE_EDIT_DELETE_STATE, None)
+
+
+def save_financial_profile_values(values):
+    try:
+        payload = {
+            "user_id": ALLOWED_USER_ID,
+            "updated_at": datetime.now(get_timezone()).isoformat()
+        }
+        payload.update(values)
+        headers = dict(supabase_headers)
+        headers["Prefer"] = "resolution=merge-duplicates,return=representation"
+        result = requests.post(
+            f"{SUPABASE_URL}/rest/v1/financial_profile",
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+        if result.status_code in [200, 201, 204]:
+            return True
+        log_system_error("save_financial_profile_values", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        return False
+    except Exception as e:
+        log_system_error("save_financial_profile_values", e)
+        return False
+
+
+def insert_financial_commitment(payload):
+    try:
+        data = {
+            "user_id": ALLOWED_USER_ID,
+            "created_at": datetime.now(get_timezone()).isoformat(),
+            "updated_at": datetime.now(get_timezone()).isoformat(),
+            "status": "active"
+        }
+        data.update(payload)
+        result = requests.post(
+            f"{SUPABASE_URL}/rest/v1/financial_commitments",
+            headers=supabase_headers,
+            json=data,
+            timeout=10
+        )
+        if result.status_code in [200, 201, 204]:
+            return True
+        log_system_error("insert_financial_commitment", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        return False
+    except Exception as e:
+        log_system_error("insert_financial_commitment", e)
+        return False
+
+
+def insert_financial_goal(payload):
+    try:
+        data = {
+            "user_id": ALLOWED_USER_ID,
+            "created_at": datetime.now(get_timezone()).isoformat(),
+            "updated_at": datetime.now(get_timezone()).isoformat(),
+            "status": "active"
+        }
+        data.update(payload)
+        result = requests.post(
+            f"{SUPABASE_URL}/rest/v1/financial_goals",
+            headers=supabase_headers,
+            json=data,
+            timeout=10
+        )
+        if result.status_code in [200, 201, 204]:
+            return True
+        log_system_error("insert_financial_goal", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        return False
+    except Exception as e:
+        log_system_error("insert_financial_goal", e)
+        return False
+
+
+def insert_financial_plan(payload):
+    try:
+        data = {
+            "user_id": ALLOWED_USER_ID,
+            "created_at": datetime.now(get_timezone()).isoformat(),
+            "updated_at": datetime.now(get_timezone()).isoformat(),
+            "status": "planned"
+        }
+        data.update(payload)
+        result = requests.post(
+            f"{SUPABASE_URL}/rest/v1/financial_plans",
+            headers=supabase_headers,
+            json=data,
+            timeout=10
+        )
+        if result.status_code in [200, 201, 204]:
+            return True
+        log_system_error("insert_financial_plan", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        return False
+    except Exception as e:
+        log_system_error("insert_financial_plan", e)
+        return False
+
+
+def fetch_finance_rows(table_name, select_columns="*", limit=50):
+    try:
+        params = {
+            "select": select_columns,
+            "user_id": f"eq.{ALLOWED_USER_ID}",
+            "order": "created_at.desc",
+            "limit": str(limit)
+        }
+        result = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{table_name}",
+            headers=supabase_headers,
+            params=params,
+            timeout=10
+        )
+        if result.status_code == 200:
+            return result.json()
+        log_system_error("fetch_finance_rows", RuntimeError(f"{table_name} returned {result.status_code}: {result.text}"))
+        return []
+    except Exception as e:
+        log_system_error("fetch_finance_rows", e)
+        return []
+
+
+def get_financial_profile_row():
+    rows = fetch_finance_rows("financial_profile", limit=1)
+    return rows[0] if rows else {}
+
+
+def format_finance_profile_summary():
+    profile = get_financial_profile_row()
+    commitments = fetch_finance_rows("financial_commitments", select_columns="id,commitment_type,name,amount,due_day,status")
+    goals = fetch_finance_rows("financial_goals", select_columns="id,title,target_amount,target_date,status")
+    plans = fetch_finance_rows("financial_plans", select_columns="id,plan_type,title,planned_amount,planned_month,status")
+
+    lines = [
+        "💼 Finance Profile",
+        "",
+        "Salary and Rent",
+        f"- Monthly Salary: {format_eur(profile.get('monthly_salary')) if profile.get('monthly_salary') else 'Not set'}",
+        f"- Monthly Rent: {format_eur(profile.get('monthly_rent')) if profile.get('monthly_rent') else 'Not set'}",
+        "",
+        "Fixed Commitments"
+    ]
+
+    if commitments:
+        for row in commitments[:8]:
+            due = row.get("due_day")
+            due_text = f" | Due day: {due}" if due else ""
+            lines.append(f"- {row.get('name', 'Commitment')} ({row.get('commitment_type', 'commitment')}): {format_eur(row.get('amount'))}{due_text}")
+    else:
+        lines.append("- None set")
+
+    lines.append("")
+    lines.append("Savings Goals")
+    if goals:
+        for row in goals[:8]:
+            target_date = row.get("target_date") or "No target date"
+            lines.append(f"- {row.get('title', 'Goal')}: {format_eur(row.get('target_amount'))} by {target_date}")
+    else:
+        lines.append("- None set")
+
+    lines.append("")
+    lines.append("Future Plans")
+    if plans:
+        for row in plans[:8]:
+            month = row.get("planned_month") or "No month set"
+            lines.append(f"- {row.get('title', 'Plan')} ({row.get('plan_type', 'plan')}): {format_eur(row.get('planned_amount'))} in {month}")
+    else:
+        lines.append("- None set")
+
+    lines.append("")
+    lines.append("Upcoming Obligations")
+    if commitments or plans:
+        for row in commitments[:5]:
+            due = row.get("due_day")
+            due_text = f"day {due}" if due else "due day not set"
+            lines.append(f"- {row.get('name', 'Commitment')}: {format_eur(row.get('amount'))} ({due_text})")
+        for row in plans[:5]:
+            month = row.get("planned_month") or "month not set"
+            lines.append(f"- {row.get('title', 'Plan')}: {format_eur(row.get('planned_amount'))} ({month})")
+    else:
+        lines.append("- No upcoming obligations")
+
+    return "\n".join(lines)
+
+
+def build_finance_item_catalog():
+    items = {}
+    lines = ["Finance items (reply with code):", ""]
+
+    profile = get_financial_profile_row()
+    if profile.get("monthly_salary") is not None:
+        items["SALARY"] = {"table": "financial_profile", "field": "monthly_salary", "id": profile.get("id")}
+        lines.append(f"- SALARY: Monthly Salary ({format_eur(profile.get('monthly_salary'))})")
+    if profile.get("monthly_rent") is not None:
+        items["RENT"] = {"table": "financial_profile", "field": "monthly_rent", "id": profile.get("id")}
+        lines.append(f"- RENT: Monthly Rent ({format_eur(profile.get('monthly_rent'))})")
+
+    commitments = fetch_finance_rows("financial_commitments", select_columns="id,name,amount", limit=20)
+    for index, row in enumerate(commitments, start=1):
+        code = f"C{index}"
+        items[code] = {"table": "financial_commitments", "field": "amount", "id": row.get("id"), "name": row.get("name") or "Commitment"}
+        lines.append(f"- {code}: {row.get('name', 'Commitment')} ({format_eur(row.get('amount'))})")
+
+    goals = fetch_finance_rows("financial_goals", select_columns="id,title,target_amount", limit=20)
+    for index, row in enumerate(goals, start=1):
+        code = f"G{index}"
+        items[code] = {"table": "financial_goals", "field": "target_amount", "id": row.get("id"), "name": row.get("title") or "Goal"}
+        lines.append(f"- {code}: {row.get('title', 'Goal')} ({format_eur(row.get('target_amount'))})")
+
+    plans = fetch_finance_rows("financial_plans", select_columns="id,title,planned_amount", limit=20)
+    for index, row in enumerate(plans, start=1):
+        code = f"P{index}"
+        items[code] = {"table": "financial_plans", "field": "planned_amount", "id": row.get("id"), "name": row.get("title") or "Plan"}
+        lines.append(f"- {code}: {row.get('title', 'Plan')} ({format_eur(row.get('planned_amount'))})")
+
+    if not items:
+        lines.append("- No editable finance items found.")
+
+    return items, "\n".join(lines)
+
+
+def update_finance_item_amount(item, amount):
+    try:
+        if item["table"] == "financial_profile":
+            payload = {
+                item["field"]: amount,
+                "updated_at": datetime.now(get_timezone()).isoformat()
+            }
+            return save_financial_profile_values(payload)
+
+        params = {"id": f"eq.{item['id']}"}
+        payload = {
+            item["field"]: amount,
+            "updated_at": datetime.now(get_timezone()).isoformat()
+        }
+        result = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/{item['table']}",
+            headers=supabase_headers,
+            params=params,
+            json=payload,
+            timeout=10
+        )
+        if result.status_code in [200, 204]:
+            return True
+        log_system_error("update_finance_item_amount", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        return False
+    except Exception as e:
+        log_system_error("update_finance_item_amount", e)
+        return False
+
+
+def delete_finance_item(item):
+    try:
+        if item["table"] == "financial_profile":
+            return save_financial_profile_values({item["field"]: None})
+
+        result = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/{item['table']}",
+            headers=supabase_headers,
+            params={"id": f"eq.{item['id']}"},
+            timeout=10
+        )
+        if result.status_code in [200, 204]:
+            return True
+        log_system_error("delete_finance_item", RuntimeError(f"Supabase returned {result.status_code}: {result.text}"))
+        return False
+    except Exception as e:
+        log_system_error("delete_finance_item", e)
         return False
 
 
@@ -2067,13 +2566,30 @@ def get_main_menu():
         ["System Status", "Show Errors"],
         ["Deploy Status", "Last Push"],
         ["Daily Briefing"],
-        ["Finance Report", "Overspending"],
+        [FINANCE_BTN_SETUP, "Finance Report"],
+        ["Overspending"],
         ["Gmail Summary", "Calendar Summary"],
         ["Asana Tasks", "Create Calendar Event"],
         ["Draft Email"],
         ["German A1"]
     ]
 
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+
+def get_finance_setup_menu():
+    keyboard = [
+        [FINANCE_BTN_SET_SALARY, FINANCE_BTN_SET_RENT],
+        [FINANCE_BTN_ADD_EMI, FINANCE_BTN_ADD_BILL],
+        [FINANCE_BTN_ADD_GOAL, FINANCE_BTN_ADD_PLAN],
+        [FINANCE_BTN_VIEW_PROFILE],
+        [FINANCE_BTN_EDIT_DELETE],
+        ["Back"]
+    ]
     return ReplyKeyboardMarkup(
         keyboard,
         resize_keyboard=True,
@@ -2409,6 +2925,7 @@ def clear_german_quiz_state(context):
 def clear_interaction_states(context):
     context.user_data.pop(WAITING_FOR_CALENDAR_EVENT, None)
     clear_email_draft_state(context)
+    clear_finance_states(context)
     clear_german_word_state(context)
     clear_german_grammar_state(context)
     context.user_data.pop(WAITING_FOR_GERMAN_CORRECTION, None)
@@ -2607,6 +3124,381 @@ async def handle_email_draft_flow(update, context, user_message, is_voice_input,
         if is_voice_input and voice_replies_enabled:
             await send_voice_reply(update, reply)
         return True
+
+    return False
+
+
+def get_finance_confirmation_menu():
+    return ReplyKeyboardMarkup(
+        [[FINANCE_CONFIRM_SAVE, FINANCE_CONFIRM_EDIT, FINANCE_CONFIRM_CANCEL]],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+
+def execute_finance_pending_action(pending):
+    action = pending.get("action")
+    payload = pending.get("payload", {})
+
+    if action == "save_profile_value":
+        ok = save_financial_profile_values(payload)
+        return ok, "Finance profile updated." if ok else "Failed to save finance profile value."
+
+    if action == "save_commitment":
+        ok = insert_financial_commitment(payload)
+        return ok, "Commitment saved." if ok else "Failed to save commitment."
+
+    if action == "save_goal":
+        ok = insert_financial_goal(payload)
+        return ok, "Savings goal saved." if ok else "Failed to save savings goal."
+
+    if action == "save_plan":
+        ok = insert_financial_plan(payload)
+        return ok, "Future plan saved." if ok else "Failed to save future plan."
+
+    if action == "edit_item_amount":
+        ok = update_finance_item_amount(payload["item"], payload["amount"])
+        return ok, "Finance item updated." if ok else "Failed to update finance item."
+
+    if action == "delete_item":
+        ok = delete_finance_item(payload["item"])
+        return ok, "Finance item deleted." if ok else "Failed to delete finance item."
+
+    return False, "Unsupported finance action."
+
+
+async def handle_finance_foundation_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
+    text = user_message.lower().strip()
+
+    if text in FINANCE_MENU_COMMANDS or text == FINANCE_BTN_SETUP.lower():
+        clear_finance_states(context)
+        await send_clean_reply(
+            update.message,
+            "Finance Setup Menu",
+            reply_markup=get_finance_setup_menu()
+        )
+        return True
+
+    if text == FINANCE_BTN_VIEW_PROFILE.lower() or is_finance_profile_question(text):
+        summary = format_finance_profile_summary()
+        await send_clean_reply(update.message, summary, reply_markup=get_finance_setup_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, summary)
+        return True
+
+    pending = context.user_data.get(FINANCE_PENDING_CONFIRM)
+    if pending:
+        if text == FINANCE_CONFIRM_SAVE.lower():
+            success, message = execute_finance_pending_action(pending)
+            clear_finance_states(context)
+            reply = f"Confirmed: {message}" if success else f"I could not confirm save.\n{message}"
+            await send_clean_reply(update.message, reply, reply_markup=get_finance_setup_menu())
+            if is_voice_input and voice_replies_enabled:
+                await send_voice_reply(update, reply)
+            return True
+
+        if text == FINANCE_CONFIRM_EDIT.lower():
+            edit_state = pending.get("edit_state")
+            edit_prompt = pending.get("edit_prompt") or "Please edit and send again."
+            context.user_data.pop(FINANCE_PENDING_CONFIRM, None)
+            if edit_state:
+                context.user_data[FINANCE_FLOW_STATE] = edit_state
+                await send_clean_reply(update.message, edit_prompt)
+                return True
+            await send_clean_reply(update.message, "Edit cancelled. Start again from Finance Setup.", reply_markup=get_finance_setup_menu())
+            return True
+
+        if text == FINANCE_CONFIRM_CANCEL.lower():
+            clear_finance_states(context)
+            await send_clean_reply(update.message, "Cancelled. No finance data was changed.", reply_markup=get_finance_setup_menu())
+            return True
+
+        await send_clean_reply(
+            update.message,
+            "Please choose ✅ Save, ✏️ Edit, or ❌ Cancel.",
+            reply_markup=get_finance_confirmation_menu()
+        )
+        return True
+
+    edit_state = context.user_data.get(FINANCE_EDIT_DELETE_STATE)
+    if text == FINANCE_BTN_EDIT_DELETE.lower() and not edit_state:
+        items, listing = build_finance_item_catalog()
+        context.user_data[FINANCE_EDIT_DELETE_STATE] = {"step": "select_item", "items": items}
+        await send_clean_reply(update.message, listing + "\n\nReply with item code (example: SALARY, C1, G1, P1).", reply_markup=get_finance_setup_menu())
+        return True
+
+    if edit_state:
+        if edit_state.get("step") == "select_item":
+            code = user_message.strip().upper()
+            item = edit_state.get("items", {}).get(code)
+            if not item:
+                await send_clean_reply(update.message, "Invalid code. Please choose from the list.", reply_markup=get_finance_setup_menu())
+                return True
+            edit_state["selected_item"] = item
+            edit_state["selected_code"] = code
+            edit_state["step"] = "choose_action"
+            action_menu = ReplyKeyboardMarkup(
+                [[FINANCE_CONFIRM_EDIT, FINANCE_ACTION_DELETE, FINANCE_CONFIRM_CANCEL]],
+                resize_keyboard=True,
+                one_time_keyboard=False
+            )
+            await send_clean_reply(update.message, f"Selected {code}. Choose Edit or Delete.", reply_markup=action_menu)
+            return True
+
+        if edit_state.get("step") == "choose_action":
+            if text == FINANCE_CONFIRM_CANCEL.lower():
+                clear_finance_states(context)
+                await send_clean_reply(update.message, "Cancelled. No finance data was changed.", reply_markup=get_finance_setup_menu())
+                return True
+            if text == FINANCE_ACTION_DELETE.lower():
+                selected = edit_state["selected_item"]
+                summary = f"I understood: Delete finance item {edit_state.get('selected_code')}. Save?"
+                set_finance_pending_confirmation(
+                    context,
+                    action="delete_item",
+                    payload={"item": selected},
+                    summary=summary
+                )
+                await send_clean_reply(update.message, summary, reply_markup=get_finance_confirmation_menu())
+                return True
+            if text == FINANCE_CONFIRM_EDIT.lower():
+                edit_state["step"] = "new_amount"
+                await send_clean_reply(update.message, "Send the new amount (EUR).")
+                return True
+            await send_clean_reply(update.message, "Please choose Edit, Delete, or Cancel.")
+            return True
+
+        if edit_state.get("step") == "new_amount":
+            amount = parse_finance_amount(user_message)
+            if amount is None:
+                await send_clean_reply(update.message, "Please enter a valid positive amount, e.g. 1200.")
+                return True
+            selected = edit_state["selected_item"]
+            summary = f"I understood: Update {edit_state.get('selected_code')} to {format_eur(amount)}. Save?"
+            set_finance_pending_confirmation(
+                context,
+                action="edit_item_amount",
+                payload={"item": selected, "amount": amount},
+                summary=summary
+            )
+            await send_clean_reply(update.message, summary, reply_markup=get_finance_confirmation_menu())
+            return True
+
+    if text == FINANCE_BTN_SET_SALARY.lower():
+        context.user_data[FINANCE_FLOW_STATE] = {"kind": "set_salary", "step": "amount"}
+        await send_clean_reply(update.message, "Enter monthly salary amount in EUR.")
+        return True
+
+    if text == FINANCE_BTN_SET_RENT.lower():
+        context.user_data[FINANCE_FLOW_STATE] = {"kind": "set_rent", "step": "amount"}
+        await send_clean_reply(update.message, "Enter monthly rent amount in EUR.")
+        return True
+
+    if text == FINANCE_BTN_ADD_EMI.lower():
+        context.user_data[FINANCE_FLOW_STATE] = {"kind": "add_emi", "step": "name", "data": {}}
+        await send_clean_reply(update.message, "Enter EMI/loan name (example: Car loan).")
+        return True
+
+    if text == FINANCE_BTN_ADD_BILL.lower():
+        context.user_data[FINANCE_FLOW_STATE] = {"kind": "add_bill", "step": "name", "data": {}}
+        await send_clean_reply(update.message, "Enter recurring bill name (example: Internet).")
+        return True
+
+    if text == FINANCE_BTN_ADD_GOAL.lower():
+        context.user_data[FINANCE_FLOW_STATE] = {"kind": "add_goal", "step": "title", "data": {}}
+        await send_clean_reply(update.message, "Enter savings goal title (example: Emergency fund).")
+        return True
+
+    if text == FINANCE_BTN_ADD_PLAN.lower():
+        context.user_data[FINANCE_FLOW_STATE] = {"kind": "add_plan", "step": "details", "data": {}}
+        await send_clean_reply(update.message, "Describe the future plan (example: Buy laptop €1200 in August).")
+        return True
+
+    flow = context.user_data.get(FINANCE_FLOW_STATE)
+    if not flow:
+        return False
+
+    kind = flow.get("kind")
+    step = flow.get("step")
+    data = flow.setdefault("data", {})
+
+    if kind in {"set_salary", "set_rent"} and step == "amount":
+        amount = parse_finance_amount(user_message)
+        if amount is None:
+            await send_clean_reply(update.message, "Please enter a valid positive amount, e.g. 1200.")
+            return True
+        field = "monthly_salary" if kind == "set_salary" else "monthly_rent"
+        label = "Monthly Salary" if kind == "set_salary" else "Rent"
+        summary = f"I understood: {label} = {format_eur(amount)} monthly. Save?"
+        edit_state = {"kind": kind, "step": "amount"}
+        set_finance_pending_confirmation(
+            context,
+            action="save_profile_value",
+            payload={field: amount},
+            summary=summary,
+            edit_state=edit_state,
+            edit_prompt=f"Please re-enter {label.lower()} amount."
+        )
+        await send_clean_reply(update.message, summary, reply_markup=get_finance_confirmation_menu())
+        return True
+
+    if kind in {"add_emi", "add_bill"}:
+        if step == "name":
+            data["name"] = user_message.strip()
+            flow["step"] = "amount"
+            await send_clean_reply(update.message, "Enter monthly amount in EUR.")
+            return True
+        if step == "amount":
+            amount = parse_finance_amount(user_message)
+            if amount is None:
+                await send_clean_reply(update.message, "Please enter a valid amount, e.g. 350.")
+                return True
+            data["amount"] = amount
+            flow["step"] = "due_day"
+            await send_clean_reply(update.message, "Enter due day in month (1-31), or type skip.")
+            return True
+        if step == "due_day":
+            due_day = None
+            if text != "skip":
+                match = re.search(r"\b([1-9]|[12][0-9]|3[01])\b", text)
+                if not match:
+                    await send_clean_reply(update.message, "Please enter a valid day 1-31, or type skip.")
+                    return True
+                due_day = int(match.group(1))
+            commitment_type = "emi_loan" if kind == "add_emi" else "recurring_bill"
+            summary = (
+                f"I understood: {data.get('name')} = {format_eur(data.get('amount'))} monthly"
+                + (f", due day {due_day}" if due_day else "")
+                + ". Save?"
+            )
+            payload = {
+                "commitment_type": commitment_type,
+                "name": data.get("name"),
+                "amount": data.get("amount"),
+                "currency": "EUR",
+                "frequency": "monthly",
+                "due_day": due_day
+            }
+            set_finance_pending_confirmation(
+                context,
+                action="save_commitment",
+                payload=payload,
+                summary=summary,
+                edit_state={"kind": kind, "step": "name", "data": {}},
+                edit_prompt="Please re-enter the commitment details."
+            )
+            await send_clean_reply(update.message, summary, reply_markup=get_finance_confirmation_menu())
+            return True
+
+    if kind == "add_goal":
+        if step == "title":
+            data["title"] = user_message.strip()
+            flow["step"] = "target_amount"
+            await send_clean_reply(update.message, "Enter target amount in EUR.")
+            return True
+        if step == "target_amount":
+            amount = parse_finance_amount(user_message)
+            if amount is None:
+                await send_clean_reply(update.message, "Please enter a valid amount, e.g. 5000.")
+                return True
+            data["target_amount"] = amount
+            flow["step"] = "target_date"
+            await send_clean_reply(update.message, "Enter target date (YYYY-MM-DD) or type skip.")
+            return True
+        if step == "target_date":
+            target_date = None
+            if text != "skip":
+                target_date = user_message.strip()
+            summary = f"I understood: Savings goal '{data.get('title')}' target {format_eur(data.get('target_amount'))}"
+            if target_date:
+                summary += f" by {target_date}"
+            summary += ". Save?"
+            payload = {
+                "title": data.get("title"),
+                "target_amount": data.get("target_amount"),
+                "target_date": target_date,
+                "currency": "EUR"
+            }
+            set_finance_pending_confirmation(
+                context,
+                action="save_goal",
+                payload=payload,
+                summary=summary,
+                edit_state={"kind": kind, "step": "title", "data": {}},
+                edit_prompt="Please re-enter savings goal details."
+            )
+            await send_clean_reply(update.message, summary, reply_markup=get_finance_confirmation_menu())
+            return True
+
+    if kind == "add_plan":
+        if step == "details":
+            parsed = parse_future_plan_text(user_message)
+            data.update(parsed)
+            if not data.get("planned_amount"):
+                flow["step"] = "planned_amount"
+                await send_clean_reply(update.message, "Enter planned amount in EUR.")
+                return True
+            if not data.get("planned_month"):
+                flow["step"] = "planned_month"
+                await send_clean_reply(update.message, "When is this planned? (example: June, next month, 2026-08)")
+                return True
+            summary = (
+                f"I understood: Future plan '{data.get('title')}' "
+                f"for {format_eur(data.get('planned_amount'))} in {data.get('planned_month')}. Save?"
+            )
+            payload = {
+                "plan_type": data.get("plan_type"),
+                "title": data.get("title"),
+                "planned_amount": data.get("planned_amount"),
+                "planned_month": data.get("planned_month"),
+                "currency": "EUR"
+            }
+            set_finance_pending_confirmation(
+                context,
+                action="save_plan",
+                payload=payload,
+                summary=summary,
+                edit_state={"kind": kind, "step": "details", "data": {}},
+                edit_prompt="Please re-enter the future plan details."
+            )
+            await send_clean_reply(update.message, summary, reply_markup=get_finance_confirmation_menu())
+            return True
+        if step == "planned_amount":
+            amount = parse_finance_amount(user_message)
+            if amount is None:
+                await send_clean_reply(update.message, "Please enter a valid amount, e.g. 1200.")
+                return True
+            data["planned_amount"] = amount
+            flow["step"] = "planned_month"
+            await send_clean_reply(update.message, "When is this planned? (example: June, next month, 2026-08)")
+            return True
+        if step == "planned_month":
+            month_value = parse_plan_month(user_message)
+            if not month_value:
+                await send_clean_reply(update.message, "Please provide month like June, next month, or 2026-08.")
+                return True
+            data["planned_month"] = month_value
+            summary = (
+                f"I understood: Future plan '{data.get('title')}' "
+                f"for {format_eur(data.get('planned_amount'))} in {data.get('planned_month')}. Save?"
+            )
+            payload = {
+                "plan_type": data.get("plan_type", "planned_expense"),
+                "title": data.get("title"),
+                "planned_amount": data.get("planned_amount"),
+                "planned_month": data.get("planned_month"),
+                "currency": "EUR"
+            }
+            set_finance_pending_confirmation(
+                context,
+                action="save_plan",
+                payload=payload,
+                summary=summary,
+                edit_state={"kind": kind, "step": "details", "data": {}},
+                edit_prompt="Please re-enter the future plan details."
+            )
+            await send_clean_reply(update.message, summary, reply_markup=get_finance_confirmation_menu())
+            return True
 
     return False
 
@@ -2862,6 +3754,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     if await handle_german_quiz_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
         return
 
+    if await handle_finance_foundation_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
+        return
+
     # Simple menu/help
     if text in MENU_COMMANDS:
         await send_clean_reply(update.message,
@@ -2931,6 +3826,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     # Consolidated automated detection for user messages
     if not is_internal:
+        if is_critical_finance_capture_request(user_message):
+            reply = (
+                "For safety, I do not save salary/rent/EMI/goals/future plans from casual text.\n"
+                "Use Finance Setup and confirm with ✅ Save."
+            )
+            await send_clean_reply(update.message, reply, reply_markup=get_finance_setup_menu())
+            return
+
         save_semantic_memory(user_message)
 
         remember_text = detect_remember_command(user_message)
