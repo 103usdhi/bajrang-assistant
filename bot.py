@@ -713,8 +713,13 @@ def search_gmail_messages(query, max_results=10):
 
         service = build("gmail", "v1", credentials=creds)
 
-        # Exclude spam and trash by default
-        final_query = f"{query} -in:spam -in:trash"
+        # Exclude spam and trash by default (avoid duplicating flags if already present)
+        final_query = query.strip()
+        if "-in:spam" not in final_query:
+            final_query = f"{final_query} -in:spam"
+        if "-in:trash" not in final_query:
+            final_query = f"{final_query} -in:trash"
+        final_query = final_query.strip()
 
         results = service.users().messages().list(
             userId="me",
@@ -723,6 +728,9 @@ def search_gmail_messages(query, max_results=10):
         ).execute()
 
         messages = results.get("messages", [])
+        if not messages:
+            return "No matching Gmail messages found."
+
         emails = []
 
         for msg in messages:
@@ -769,6 +777,65 @@ def get_gmail_summary(text=None):
     except Exception as e:
         log_system_error("get_gmail_summary", e)
         return f"Gmail fetch failed: {str(e)}"
+
+
+def quote_gmail_from_value(value):
+    sender = value.strip().strip("?.!,;:")
+    if not sender:
+        return ""
+    if " " in sender and not (sender.startswith('"') and sender.endswith('"')):
+        sender = f'"{sender}"'
+    return sender
+
+
+def parse_gmail_search_intent(text):
+    if not text:
+        return None
+
+    lowered = text.lower().strip()
+    if lowered == "gmail summary":
+        return None
+
+    from_patterns = [
+        (r"most recent email from\s+(.+)$", "latest_from"),
+        (r"latest email from\s+(.+)$", "latest_from"),
+        (r"did i get an email from\s+(.+)$", "did_i_get_from"),
+        (r"any email from\s+(.+)$", "did_i_get_from"),
+        (r"email from\s+(.+)$", "from"),
+        (r"mail from\s+(.+)$", "from"),
+        (r"gmail from\s+(.+)$", "from")
+    ]
+
+    for pattern, intent in from_patterns:
+        match = re.search(pattern, lowered, flags=re.IGNORECASE)
+        if not match:
+            continue
+        sender = quote_gmail_from_value(match.group(1))
+        if not sender:
+            return None
+        if intent == "latest_from":
+            return {"intent": intent, "query": f"from:{sender}", "max_results": 1, "fallback_query": None}
+        if intent == "did_i_get_from":
+            return {
+                "intent": intent,
+                "query": f"from:{sender}",
+                "max_results": 5,
+                "fallback_query": sender
+            }
+        return {"intent": intent, "query": f"from:{sender}", "max_results": 7, "fallback_query": None}
+
+    search_patterns = [
+        r"search gmail for\s+(.+)$",
+        r"find email about\s+(.+)$"
+    ]
+    for pattern in search_patterns:
+        match = re.search(pattern, lowered, flags=re.IGNORECASE)
+        if match:
+            query = match.group(1).strip().strip("?.!,;:")
+            if query:
+                return {"intent": "search", "query": query, "max_results": 7, "fallback_query": None}
+
+    return None
 
 
 def create_gmail_draft(to_email, subject, body):
@@ -2623,6 +2690,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     # Daily briefing shortcut
     if text == "daily briefing":
         await send_daily_briefing(context.application)
+        return
+
+    gmail_intent = parse_gmail_search_intent(user_message)
+    if gmail_intent:
+        logging.info(
+            "Gmail intent detected: type=%s query=%s max_results=%s",
+            gmail_intent.get("intent"),
+            gmail_intent.get("query"),
+            gmail_intent.get("max_results"),
+        )
+        result = search_gmail_messages(
+            gmail_intent["query"],
+            max_results=gmail_intent["max_results"]
+        )
+        if (
+            result == "No matching Gmail messages found."
+            and gmail_intent.get("fallback_query")
+        ):
+            result = search_gmail_messages(gmail_intent["fallback_query"], max_results=7)
+
+        await send_clean_reply(update.message, result, reply_markup=get_main_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, result)
         return
 
     if text == "documents":
