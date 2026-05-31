@@ -6,9 +6,11 @@ import logging
 import requests
 import base64
 import random
+import html
 from datetime import datetime, timedelta
 import tempfile
 from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -172,6 +174,7 @@ Recovery:
 3. Copy the generated token JSON.
 4. Update GOOGLE_TOKEN_JSON in Render.
 5. Redeploy Bajrang."""
+GMAIL_NO_MATCH_MESSAGE = "📭 No matching Gmail messages found."
 
 supabase_headers = {
     "apikey": SUPABASE_KEY,
@@ -704,6 +707,68 @@ def get_gmail_search_query(text):
     return query.strip()
 
 
+def clean_gmail_snippet(snippet, max_length=150):
+    text = html.unescape(str(snippet or ""))
+    text = re.sub(r"[\u034f\u200b-\u200f\ufeff]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    if len(text) <= max_length:
+        return text
+
+    truncated = text[:max_length].rsplit(" ", 1)[0].strip()
+    return (truncated or text[:max_length]).rstrip() + "..."
+
+
+def format_gmail_date(raw_date):
+    value = str(raw_date or "").strip()
+    if not value:
+        return "Unknown"
+    try:
+        dt = parsedate_to_datetime(value)
+        return dt.strftime("%a, %d %b %Y")
+    except Exception:
+        return value
+
+
+def format_gmail_search_results(emails, requested_max_results, total_estimate=None):
+    if not emails:
+        return GMAIL_NO_MATCH_MESSAGE
+
+    single_result = requested_max_results == 1 or len(emails) == 1
+    if single_result:
+        email_row = emails[0]
+        return "\n".join([
+            "📧 Latest matching email",
+            "",
+            f"From: {email_row.get('from') or 'Unknown'}",
+            f"Subject: {email_row.get('subject') or 'No subject'}",
+            f"Date: {format_gmail_date(email_row.get('date'))}",
+            f"Snippet: {clean_gmail_snippet(email_row.get('snippet', '')) or 'No preview available.'}"
+        ])
+
+    shown = emails[:5]
+    lines = [
+        "📧 Gmail Search Results",
+        "",
+        f"Found {len(emails)} matching emails."
+    ]
+
+    if (total_estimate and total_estimate > len(shown)) or len(emails) > 5:
+        lines.append("Showing top 5 results.")
+
+    lines.append("")
+    for idx, email_row in enumerate(shown, start=1):
+        lines.extend([
+            f"{idx}. From: {email_row.get('from') or 'Unknown'}",
+            f"Subject: {email_row.get('subject') or 'No subject'}",
+            f"Date: {format_gmail_date(email_row.get('date'))}",
+            f"Snippet: {clean_gmail_snippet(email_row.get('snippet', '')) or 'No preview available.'}",
+            ""
+        ])
+
+    return "\n".join(lines).strip()
+
+
 def search_gmail_messages(query, max_results=10):
     """Helper to search Gmail and return metadata + snippets. Excludes spam/trash."""
     try:
@@ -728,8 +793,9 @@ def search_gmail_messages(query, max_results=10):
         ).execute()
 
         messages = results.get("messages", [])
+        result_estimate = results.get("resultSizeEstimate")
         if not messages:
-            return "No matching Gmail messages found."
+            return GMAIL_NO_MATCH_MESSAGE
 
         emails = []
 
@@ -755,7 +821,11 @@ def search_gmail_messages(query, max_results=10):
 
             emails.append(email)
 
-        return json.dumps(emails, indent=2)
+        return format_gmail_search_results(
+            emails,
+            requested_max_results=max_results,
+            total_estimate=result_estimate
+        )
     except Exception as e:
         log_system_error("search_gmail_messages", e)
         return f"Gmail search failed: {str(e)}"
@@ -2705,7 +2775,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
             max_results=gmail_intent["max_results"]
         )
         if (
-            result == "No matching Gmail messages found."
+            result == GMAIL_NO_MATCH_MESSAGE
             and gmail_intent.get("fallback_query")
         ):
             result = search_gmail_messages(gmail_intent["fallback_query"], max_results=7)
