@@ -858,6 +858,35 @@ def quote_gmail_from_value(value):
     return sender
 
 
+def extract_gmail_result_count(text, default=7):
+    match = re.search(r"\b(?:top|latest|first)\s+(\d{1,2})\b", text or "", flags=re.IGNORECASE)
+    if not match:
+        return default
+
+    try:
+        count = int(match.group(1))
+    except Exception:
+        return default
+
+    return max(1, min(count, 20))
+
+
+def normalize_gmail_search_term(value):
+    term = str(value or "").strip().strip("?.!,;:")
+    term = term.strip('"').strip("'").strip()
+    term = re.sub(r"\s+", " ", term)
+    return term
+
+
+def build_gmail_subject_query(value):
+    term = normalize_gmail_search_term(value)
+    if not term:
+        return ""
+    if " " in term and not (term.startswith('"') and term.endswith('"')):
+        term = f'"{term}"'
+    return f"subject:{term}"
+
+
 def parse_gmail_search_intent(text):
     if not text:
         return None
@@ -904,6 +933,65 @@ def parse_gmail_search_intent(text):
             query = match.group(1).strip().strip("?.!,;:")
             if query:
                 return {"intent": "search", "query": query, "max_results": 7, "fallback_query": None}
+
+    # Advanced generic Gmail intent detection:
+    # supports "top/latest/first N", subject filters, sender filters, and containing/mentioning terms.
+    if not re.search(r"\b(email|emails|gmail|mail|inbox|subject|sender|from|containing|mentioning)\b", lowered):
+        return None
+
+    max_results = extract_gmail_result_count(lowered, default=7)
+
+    subject_patterns = [
+        r"subject\s+(?:is\s+like|like|contains?|containing)\s+['\"]?(.+?)['\"]?$",
+        r"(?:emails?|mail|gmail)\s+with\s+subject\s+['\"]?(.+?)['\"]?$",
+        r"with\s+subject\s+['\"]?(.+?)['\"]?$",
+        r"subject\s+['\"]?(.+?)['\"]?$"
+    ]
+    for pattern in subject_patterns:
+        match = re.search(pattern, lowered, flags=re.IGNORECASE)
+        if match:
+            subject_query = build_gmail_subject_query(match.group(1))
+            if subject_query:
+                return {
+                    "intent": "advanced_subject_search",
+                    "query": subject_query,
+                    "max_results": max_results,
+                    "fallback_query": None
+                }
+
+    from_patterns = [
+        r"(?:top|latest|first)?\s*\d*\s*(?:emails?|mail|gmail)\s+from\s+(.+)$",
+        r"(?:emails?|mail|gmail)\s+from\s+(.+)$",
+        r"sender\s+(?:is|from)\s+(.+)$"
+    ]
+    for pattern in from_patterns:
+        match = re.search(pattern, lowered, flags=re.IGNORECASE)
+        if match:
+            sender = quote_gmail_from_value(match.group(1))
+            if sender:
+                return {
+                    "intent": "advanced_from_search",
+                    "query": f"from:{sender}",
+                    "max_results": max_results,
+                    "fallback_query": None
+                }
+
+    term_patterns = [
+        r"(?:emails?|mail|gmail)\s+(?:containing|mentioning)\s+['\"]?(.+?)['\"]?$",
+        r"(?:containing|mentioning)\s+['\"]?(.+?)['\"]?$",
+        r"(?:search gmail for|search email for|find emails? containing|find emails? about|find email about)\s+['\"]?(.+?)['\"]?$"
+    ]
+    for pattern in term_patterns:
+        match = re.search(pattern, lowered, flags=re.IGNORECASE)
+        if match:
+            term = normalize_gmail_search_term(match.group(1))
+            if term:
+                return {
+                    "intent": "advanced_term_search",
+                    "query": term,
+                    "max_results": max_results,
+                    "fallback_query": None
+                }
 
     return None
 
