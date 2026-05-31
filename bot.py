@@ -161,6 +161,18 @@ ICON_CHECK = "\u2705"
 ICON_CLIPBOARD = "\U0001f4cb"
 ICON_MAGNIFIER = "\U0001f50e"
 
+GMAIL_RECOVERY_MESSAGE = """Gmail authentication is unavailable.
+
+Likely cause:
+- Google refresh token expired or was revoked.
+
+Recovery:
+1. Run google_reauth.py locally.
+2. Complete Google OAuth login.
+3. Copy the generated token JSON.
+4. Update GOOGLE_TOKEN_JSON in Render.
+5. Redeploy Bajrang."""
+
 supabase_headers = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -678,19 +690,36 @@ def get_google_credentials(required_scopes=None):
         return None
 
 
-def get_gmail_summary():
+def get_gmail_search_query(text):
+    """Strips trigger words to isolate search terms for the Gmail API."""
+    if not text:
+        return ""
+    query = text.lower().strip()
+    # Remove specific command aliases
+    for cmd in ["gmail summary", "search gmail", "find email", "search email", "find mail"]:
+        query = query.replace(cmd, "")
+    # Remove common action verbs
+    for word in ["show", "get", "check", "read", "did i get", "is there", "any"]:
+        query = re.sub(rf"\b{word}\b", "", query, flags=re.IGNORECASE)
+    return query.strip()
+
+
+def search_gmail_messages(query, max_results=10):
+    """Helper to search Gmail and return metadata + snippets. Excludes spam/trash."""
     try:
         creds = get_google_credentials()
-
         if not creds:
-            return "Google token missing."
+            return GMAIL_RECOVERY_MESSAGE
 
         service = build("gmail", "v1", credentials=creds)
 
+        # Exclude spam and trash by default
+        final_query = f"{query} -in:spam -in:trash"
+
         results = service.users().messages().list(
             userId="me",
-            maxResults=3,
-            q="in:inbox"
+            maxResults=max_results,
+            q=final_query
         ).execute()
 
         messages = results.get("messages", [])
@@ -704,8 +733,9 @@ def get_gmail_summary():
                 metadataHeaders=["From", "Subject", "Date"]
             ).execute()
 
+            snippet = message.get("snippet", "")
             headers = message.get("payload", {}).get("headers", [])
-            email = {"from": "", "subject": "", "date": ""}
+            email = {"from": "", "subject": "", "date": "", "snippet": snippet}
 
             for h in headers:
                 if h["name"].lower() == "from":
@@ -719,6 +749,24 @@ def get_gmail_summary():
 
         return json.dumps(emails, indent=2)
     except Exception as e:
+        log_system_error("search_gmail_messages", e)
+        return f"Gmail search failed: {str(e)}"
+
+
+def get_gmail_summary(text=None):
+    """Fetches a summary of recent emails, or performs a specific search if text is provided."""
+    search_terms = get_gmail_search_query(text)
+    
+    # Default to inbox if no specific search term, otherwise prioritize search
+    if not search_terms or search_terms in ["summary", "inbox"]:
+        query = "in:inbox"
+    else:
+        # If the user doesn't specify 'all mail', we still prefer inbox results
+        query = f"in:inbox {search_terms}" if "all mail" not in text.lower() else search_terms
+
+    try:
+        return search_gmail_messages(query, max_results=7)
+    except Exception as e:
         log_system_error("get_gmail_summary", e)
         return f"Gmail fetch failed: {str(e)}"
 
@@ -728,14 +776,7 @@ def create_gmail_draft(to_email, subject, body):
         creds = get_google_credentials(required_scopes=[GMAIL_COMPOSE_SCOPE])
 
         if not creds:
-            log_system_error(
-                "create_gmail_draft",
-                RuntimeError(f"Missing Google token or required scope {GMAIL_COMPOSE_SCOPE}.")
-            )
-            return (
-                "Gmail draft creation failed: missing Google token or required "
-                f"scope {GMAIL_COMPOSE_SCOPE}."
-            )
+            return GMAIL_RECOVERY_MESSAGE
 
         message = EmailMessage()
         message["To"] = to_email
@@ -2349,7 +2390,10 @@ def build_live_context(text):
 
     for should_fetch, title, provider in LIVE_CONTEXT_PROVIDERS:
         if should_fetch(text):
-            context_parts.append(f"\n\n{title}:\n{provider()}")
+            if provider == get_gmail_summary:
+                context_parts.append(f"\n\n{title}:\n{provider(text)}")
+            else:
+                context_parts.append(f"\n\n{title}:\n{provider()}")
 
     return "".join(context_parts)
 
@@ -2630,7 +2674,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     command = get_formatted_command(text)
     if command:
         title, provider = command
-        raw = provider()
+        if provider == get_gmail_summary:
+            raw = provider(text)
+        else:
+            raw = provider()
         formatted = format_with_claude(title, raw)
         await send_clean_reply(update.message,formatted, reply_markup=get_main_menu())
         return
