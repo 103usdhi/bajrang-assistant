@@ -797,12 +797,18 @@ def is_finance_profile_question(text):
     lowered = str(text or "").lower().strip()
     if not lowered:
         return False
-    finance_targets = (
-        "finance profile", "my salary", "my rent", "emi", "loan", "commitment",
-        "savings goal", "future plan", "upcoming obligations", "fixed commitments"
+
+    # Prevent long pasted documents from being misrouted into finance profile view.
+    if len(lowered) > 300:
+        return False
+
+    normalized = re.sub(r"\s+", " ", lowered)
+
+    explicit_patterns = (
+        r"^(show|view|list|summarize|summary of|what(?:'s| is)|how much(?: is| are)?)\s+(my\s+)?(finance profile|salary|rent|emi|loan|commitments?|fixed commitments?|savings goals?|future plans?|upcoming obligations)\b",
+        r"^(finance profile|my finance profile|view finance profile|show finance profile)\b"
     )
-    action_words = ("show", "view", "what", "how much", "list", "summary", "profile")
-    return any(target in lowered for target in finance_targets) and any(word in lowered for word in action_words)
+    return any(re.search(pattern, normalized) for pattern in explicit_patterns)
 
 
 def set_finance_pending_confirmation(context, action, payload, summary, edit_state=None, edit_prompt=None):
