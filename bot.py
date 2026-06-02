@@ -458,6 +458,77 @@ def generate_embedding(text):
     return response.data[0].embedding
 
 
+def looks_like_low_value_memory_text(content):
+    text = str(content or "").strip()
+    if not text:
+        return True
+
+    lowered = text.lower()
+    compact = re.sub(r"\s+", " ", lowered)
+
+    question_starts = (
+        "do you", "did you", "can you", "could you", "will you", "would you",
+        "what is", "what's", "where is", "when is", "why is", "how is",
+        "who is", "which", "shall i", "should i", "is it", "are you"
+    )
+    transient_commands = (
+        "system status", "show errors", "deploy status", "render status",
+        "last push", "github status", "gmail summary", "calendar summary",
+        "asana tasks", "finance report", "view finance profile", "show finance profile",
+        "search gmail", "find email", "email from", "most recent email", "latest email",
+        "read it", "draft email"
+    )
+
+    if compact.endswith("?") or compact.startswith(question_starts):
+        return True
+    if any(cmd in compact for cmd in transient_commands):
+        return True
+    if len(compact) < 12:
+        return True
+    return False
+
+
+def should_store_semantic_memory(content, source):
+    src = str(source or "telegram").strip().lower()
+    text = str(content or "").strip()
+    if not text:
+        return False
+
+    # Keep document chunks and explicit memory sources.
+    durable_sources = {"pdf", "personal_memory", "insurance", "document_note", "project_note"}
+    if src in durable_sources:
+        return True
+
+    if src == "telegram" and looks_like_low_value_memory_text(text):
+        return False
+
+    return True
+
+
+def filter_semantic_results(results, query_text):
+    filtered = []
+    query = str(query_text or "").strip().lower()
+
+    for row in results or []:
+        content = str(row.get("content", "")).strip()
+        source = str(row.get("source", "")).strip().lower()
+        if not content:
+            continue
+
+        if source == "telegram" and looks_like_low_value_memory_text(content):
+            continue
+
+        # Avoid treating repeated questions as factual memory.
+        normalized = re.sub(r"\s+", " ", content.lower()).strip(" .!?")
+        query_norm = re.sub(r"\s+", " ", query).strip(" .!?")
+        if query_norm and normalized == query_norm:
+            continue
+
+        filtered.append(row)
+
+    return filtered
+
+
 def get_finance_summary():
     """Aggregates balance and monthly spending for AI context."""
     try:
@@ -478,6 +549,8 @@ def save_semantic_memory(content, source="telegram"):
         return
 
     try:
+        if not should_store_semantic_memory(content, source):
+            return
         embedding = generate_embedding(content)
         url = f"{SUPABASE_URL}/rest/v1/semantic_memory"
         data = {
@@ -576,11 +649,28 @@ def clear_memory_intent_state(context):
     context.user_data.pop(MEMORY_PENDING_SAVE_STATE, None)
 
 
+def is_blocked_finance_memory_source(source):
+    return str(source or "").strip().lower() in {"finance", "finance_memory"}
+
+
+def is_source_allowed_for_finance_like_content(source):
+    src = str(source or "").strip().lower()
+    return src in {"document_note", "insurance", "project_note", "pdf"}
+
+
+def should_block_memory_save_for_finance_profile(content, source):
+    if is_blocked_finance_memory_source(source):
+        return True
+    if is_source_allowed_for_finance_like_content(source):
+        return False
+    return is_critical_finance_capture_request(content)
+
+
 def save_explicit_memory_content(content, source):
     text = str(content or "").strip()
     if not text:
         return False
-    if is_critical_finance_capture_request(text):
+    if should_block_memory_save_for_finance_profile(text, source):
         return False
     save_semantic_memory(text, source=source)
     return True
@@ -3409,7 +3499,7 @@ async def handle_memory_intent_flow(update, context, user_message, is_voice_inpu
 
         if selected_source:
             content = pending_save.get("content", "")
-            if is_critical_finance_capture_request(content):
+            if should_block_memory_save_for_finance_profile(content, selected_source):
                 clear_memory_intent_state(context)
                 reply = (
                     "I did not save this into memory because it looks like critical finance profile data.\n"
@@ -3448,7 +3538,7 @@ async def handle_memory_intent_flow(update, context, user_message, is_voice_inpu
     if waiting_memory:
         source = waiting_memory.get("source", "personal_memory")
         context.user_data.pop(WAITING_FOR_MEMORY_CONTENT, None)
-        if source == "finance_memory" or is_critical_finance_capture_request(text):
+        if should_block_memory_save_for_finance_profile(text, source):
             clear_memory_intent_state(context)
             reply = (
                 "I did not save this into memory because it appears to be critical finance profile data.\n"
@@ -3469,7 +3559,7 @@ async def handle_memory_intent_flow(update, context, user_message, is_voice_inpu
 
     recall_topic = detect_memory_recall_topic(text)
     if recall_topic:
-        results = search_semantic_memory(recall_topic)
+        results = filter_semantic_results(search_semantic_memory(recall_topic), recall_topic)
         reply = format_memory_recall_response(recall_topic, results)
         await send_clean_reply(update.message, reply, reply_markup=get_main_menu())
         if is_voice_input and voice_replies_enabled:
@@ -3496,7 +3586,7 @@ async def handle_memory_intent_flow(update, context, user_message, is_voice_inpu
         source = save_intent.get("source", "personal_memory")
         content = (save_intent.get("content") or "").strip()
 
-        if source == "finance_memory":
+        if is_blocked_finance_memory_source(source):
             clear_memory_intent_state(context)
             reply = (
                 "Finance memory capture for profile data is disabled.\n"
@@ -3510,7 +3600,7 @@ async def handle_memory_intent_flow(update, context, user_message, is_voice_inpu
             await send_clean_reply(update.message, f"Send the text to save as {source.replace('_', ' ')}.")
             return True
 
-        if is_critical_finance_capture_request(content):
+        if should_block_memory_save_for_finance_profile(content, source):
             clear_memory_intent_state(context)
             reply = (
                 "I did not save this into memory because it appears to be critical finance profile data.\n"
@@ -4415,7 +4505,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         return
 
     # Semantic search & contexts
-    semantic_results = search_semantic_memory(user_message)
+    semantic_results = filter_semantic_results(
+        search_semantic_memory(user_message),
+        user_message
+    )
     semantic_context = ""
 
     if semantic_results:
