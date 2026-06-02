@@ -209,6 +209,14 @@ FINANCE_CONFIRM_SAVE = "✅ Save"
 FINANCE_CONFIRM_EDIT = "✏️ Edit"
 FINANCE_CONFIRM_CANCEL = "❌ Cancel"
 FINANCE_ACTION_DELETE = "🗑 Delete"
+WAITING_FOR_READ_IT_CONTENT = "waiting_for_read_it_content"
+WAITING_FOR_MEMORY_CONTENT = "waiting_for_memory_content"
+MEMORY_CAPTURE_STATE = "memory_capture_state"
+MEMORY_PENDING_SAVE_STATE = "memory_pending_save_state"
+
+MEMORY_BTN_SAVE = "📌 Save as Memory"
+MEMORY_BTN_DOC_NOTE = "📄 Save as Document Note"
+MEMORY_BTN_NO_SAVE = "❌ Do Not Save"
 
 supabase_headers = {
     "apikey": SUPABASE_KEY,
@@ -480,6 +488,114 @@ def save_semantic_memory(content, source="telegram"):
         requests.post(url, headers=supabase_headers, json=data, timeout=10)
     except Exception as e:
         log_system_error("save_semantic_memory", e)
+
+
+def get_memory_save_menu():
+    return ReplyKeyboardMarkup(
+        [[MEMORY_BTN_SAVE, MEMORY_BTN_DOC_NOTE, MEMORY_BTN_NO_SAVE]],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+
+def extract_prefixed_content(text, prefixes):
+    original = str(text or "").strip()
+    lowered = original.lower()
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            return original[len(prefix):].lstrip(" :-\n\t")
+    return None
+
+
+def detect_memory_save_command(text):
+    original = str(text or "").strip()
+    lowered = original.lower()
+
+    command_map = [
+        ("add this to insurance memory", "insurance"),
+        ("add to insurance memory", "insurance"),
+        ("remember this", "personal_memory"),
+        ("save this", "personal_memory"),
+        ("add this to document note", "document_note"),
+        ("add this to project note", "project_note"),
+        ("add to project note", "project_note"),
+        ("add to finance memory", "finance_memory"),
+        ("add this to finance memory", "finance_memory")
+    ]
+
+    for prefix, source in command_map:
+        if lowered.startswith(prefix):
+            content = original[len(prefix):].lstrip(" :-\n\t")
+            return {"source": source, "content": content}
+
+    return None
+
+
+def detect_memory_recall_topic(text):
+    lowered = str(text or "").strip().lower()
+    patterns = [
+        r"^what do you remember about\s+(.+)$",
+        r"^what do you remember on\s+(.+)$",
+        r"^remember anything about\s+(.+)$"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, lowered)
+        if match:
+            return match.group(1).strip(" ?.!,;:")
+    return None
+
+
+def is_read_it_request(text):
+    lowered = str(text or "").strip().lower()
+    return lowered.startswith("read it")
+
+
+def summarize_read_request_content(content):
+    try:
+        limited = truncate_text(content, max_length=6000, preserve_newlines=True)
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=450,
+            system=(
+                "Summarize pasted text for Telegram. "
+                "Use short sections: Summary, Key Points, Suggested Next Step. "
+                "Do not claim data was saved."
+            ),
+            messages=[{"role": "user", "content": limited}]
+        )
+        return response.content[0].text
+    except Exception as e:
+        log_system_error("summarize_read_request_content", e)
+        return "I could not summarize that text right now."
+
+
+def clear_memory_intent_state(context):
+    context.user_data.pop(WAITING_FOR_READ_IT_CONTENT, None)
+    context.user_data.pop(WAITING_FOR_MEMORY_CONTENT, None)
+    context.user_data.pop(MEMORY_CAPTURE_STATE, None)
+    context.user_data.pop(MEMORY_PENDING_SAVE_STATE, None)
+
+
+def save_explicit_memory_content(content, source):
+    text = str(content or "").strip()
+    if not text:
+        return False
+    if is_critical_finance_capture_request(text):
+        return False
+    save_semantic_memory(text, source=source)
+    return True
+
+
+def format_memory_recall_response(topic, results):
+    if not results:
+        return f"I do not have saved memory entries for '{topic}' yet."
+
+    lines = [f"Memory recall for '{topic}':", ""]
+    for idx, row in enumerate(results[:5], start=1):
+        source = row.get("source") or "memory"
+        content = truncate_text(row.get("content", ""), max_length=220, preserve_newlines=False)
+        lines.append(f"{idx}. [{source}] {content}")
+    return "\n".join(lines)
 
 
 def save_document_metadata(doc_data):
@@ -3069,6 +3185,7 @@ def clear_german_quiz_state(context):
 def clear_interaction_states(context):
     context.user_data.pop(WAITING_FOR_CALENDAR_EVENT, None)
     clear_email_draft_state(context)
+    clear_memory_intent_state(context)
     clear_finance_states(context)
     clear_german_word_state(context)
     clear_german_grammar_state(context)
@@ -3265,6 +3382,151 @@ async def handle_email_draft_flow(update, context, user_message, is_voice_input,
 
         save_to_supabase("Draft Email", reply)
         await send_clean_reply(update.message,reply, reply_markup=get_main_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
+        return True
+
+    return False
+
+
+async def handle_memory_intent_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
+    text = str(user_message or "").strip()
+    lowered = text.lower()
+
+    pending_save = context.user_data.get(MEMORY_PENDING_SAVE_STATE)
+    if pending_save:
+        if lowered == MEMORY_BTN_NO_SAVE.lower():
+            clear_memory_intent_state(context)
+            reply = "Understood. I did not save this text."
+            await send_clean_reply(update.message, reply, reply_markup=get_main_menu())
+            return True
+
+        selected_source = None
+        if lowered == MEMORY_BTN_SAVE.lower():
+            selected_source = "personal_memory"
+        elif lowered == MEMORY_BTN_DOC_NOTE.lower():
+            selected_source = "document_note"
+
+        if selected_source:
+            content = pending_save.get("content", "")
+            if is_critical_finance_capture_request(content):
+                clear_memory_intent_state(context)
+                reply = (
+                    "I did not save this into memory because it looks like critical finance profile data.\n"
+                    "Please use Finance Setup for salary/rent/EMI/goals/plans."
+                )
+                await send_clean_reply(update.message, reply, reply_markup=get_finance_setup_menu())
+                return True
+
+            saved = save_explicit_memory_content(content, selected_source)
+            clear_memory_intent_state(context)
+            reply = (
+                f"Confirmed: saved as {selected_source.replace('_', ' ')}."
+                if saved
+                else "I could not confirm this memory save."
+            )
+            await send_clean_reply(update.message, reply, reply_markup=get_main_menu())
+            return True
+
+        await send_clean_reply(
+            update.message,
+            "Please choose whether to save this text.",
+            reply_markup=get_memory_save_menu()
+        )
+        return True
+
+    if context.user_data.get(WAITING_FOR_READ_IT_CONTENT):
+        context.user_data.pop(WAITING_FOR_READ_IT_CONTENT, None)
+        content = text
+        summary = summarize_read_request_content(content)
+        context.user_data[MEMORY_PENDING_SAVE_STATE] = {"content": content}
+        reply = summary + "\n\nWould you like me to save this?"
+        await send_clean_reply(update.message, reply, reply_markup=get_memory_save_menu())
+        return True
+
+    waiting_memory = context.user_data.get(WAITING_FOR_MEMORY_CONTENT)
+    if waiting_memory:
+        source = waiting_memory.get("source", "personal_memory")
+        context.user_data.pop(WAITING_FOR_MEMORY_CONTENT, None)
+        if source == "finance_memory" or is_critical_finance_capture_request(text):
+            clear_memory_intent_state(context)
+            reply = (
+                "I did not save this into memory because it appears to be critical finance profile data.\n"
+                "Please use Finance Setup."
+            )
+            await send_clean_reply(update.message, reply, reply_markup=get_finance_setup_menu())
+            return True
+
+        saved = save_explicit_memory_content(text, source)
+        clear_memory_intent_state(context)
+        reply = (
+            f"Confirmed: saved to {source.replace('_', ' ')}."
+            if saved
+            else "I could not confirm that memory save."
+        )
+        await send_clean_reply(update.message, reply, reply_markup=get_main_menu())
+        return True
+
+    recall_topic = detect_memory_recall_topic(text)
+    if recall_topic:
+        results = search_semantic_memory(recall_topic)
+        reply = format_memory_recall_response(recall_topic, results)
+        await send_clean_reply(update.message, reply, reply_markup=get_main_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, reply)
+        return True
+
+    read_content = extract_prefixed_content(text, ["read it:", "read it"])
+    if read_content is not None:
+        if not read_content.strip():
+            context.user_data[WAITING_FOR_READ_IT_CONTENT] = True
+            await send_clean_reply(update.message, "Paste the text and I will summarize it first.")
+            return True
+
+        summary = summarize_read_request_content(read_content)
+        context.user_data[MEMORY_PENDING_SAVE_STATE] = {"content": read_content}
+        reply = summary + "\n\nWould you like me to save this?"
+        await send_clean_reply(update.message, reply, reply_markup=get_memory_save_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, summary)
+        return True
+
+    save_intent = detect_memory_save_command(text)
+    if save_intent:
+        source = save_intent.get("source", "personal_memory")
+        content = (save_intent.get("content") or "").strip()
+
+        if source == "finance_memory":
+            clear_memory_intent_state(context)
+            reply = (
+                "Finance memory capture for profile data is disabled.\n"
+                "Please use Finance Setup so values are confirmed before saving."
+            )
+            await send_clean_reply(update.message, reply, reply_markup=get_finance_setup_menu())
+            return True
+
+        if not content:
+            context.user_data[WAITING_FOR_MEMORY_CONTENT] = {"source": source}
+            await send_clean_reply(update.message, f"Send the text to save as {source.replace('_', ' ')}.")
+            return True
+
+        if is_critical_finance_capture_request(content):
+            clear_memory_intent_state(context)
+            reply = (
+                "I did not save this into memory because it appears to be critical finance profile data.\n"
+                "Please use Finance Setup."
+            )
+            await send_clean_reply(update.message, reply, reply_markup=get_finance_setup_menu())
+            return True
+
+        saved = save_explicit_memory_content(content, source)
+        clear_memory_intent_state(context)
+        reply = (
+            f"Confirmed: saved to {source.replace('_', ' ')}."
+            if saved
+            else "I could not confirm that memory save."
+        )
+        await send_clean_reply(update.message, reply, reply_markup=get_main_menu())
         if is_voice_input and voice_replies_enabled:
             await send_voice_reply(update, reply)
         return True
@@ -3883,6 +4145,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         await send_clean_reply(update.message,"Back to main menu.", reply_markup=get_main_menu())
         return
 
+    # Read-it and memory save decisions should run before other routing guards.
+    if (
+        is_read_it_request(user_message)
+        or context.user_data.get(WAITING_FOR_READ_IT_CONTENT)
+        or context.user_data.get(MEMORY_PENDING_SAVE_STATE)
+        or context.user_data.get(WAITING_FOR_MEMORY_CONTENT)
+    ):
+        if await handle_memory_intent_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
+            return
+
     if context.user_data.get(WAITING_FOR_CALENDAR_EVENT):
         context.user_data.pop(WAITING_FOR_CALENDAR_EVENT, None)
         reply = create_calendar_event_reply(user_message)
@@ -3905,6 +4177,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
         return
 
     if await handle_german_quiz_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
+        return
+
+    if await handle_memory_intent_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
         return
 
     if await handle_finance_foundation_flow(update, context, user_message, is_voice_input, voice_replies_enabled):
@@ -3979,28 +4254,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
 
     # Consolidated automated detection for user messages
     if not is_internal:
-        if is_critical_finance_capture_request(user_message):
+        if is_critical_finance_capture_request(user_message) and not is_read_it_request(user_message):
             reply = (
                 "For safety, I do not save salary/rent/EMI/goals/future plans from casual text.\n"
                 "Use Finance Setup and confirm with ✅ Save."
             )
             await send_clean_reply(update.message, reply, reply_markup=get_finance_setup_menu())
-            return
-
-        save_semantic_memory(user_message)
-
-        remember_text = detect_remember_command(user_message)
-        if remember_text:
-            saved = save_personal_memory(remember_text)
-            reply = (
-                f"Confirmed: I saved this memory.\nMemory: {remember_text}"
-                if saved
-                else "I could not confirm that this memory was saved. Please try again or check system logs."
-            )
-            save_to_supabase(user_message, reply)
-            await send_clean_reply(update.message,reply)
-            if is_voice_input and voice_replies_enabled:
-                await send_voice_reply(update, reply)
             return
 
         finance_tx = classify_finance_message(user_message)
