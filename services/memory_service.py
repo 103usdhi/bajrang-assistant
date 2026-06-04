@@ -164,8 +164,11 @@ def extract_prefixed_content(text, prefixes):
 
 def detect_memory_save_command(text):
     original = str(text or "").strip()
-    lowered = original.lower()
+    lowered = original.lower().strip()
+    if not lowered:
+        return None
 
+    # Legacy exact-prefix support (kept for backward compatibility).
     command_map = [
         ("add this to insurance memory", "insurance"),
         ("add to insurance memory", "insurance"),
@@ -177,10 +180,32 @@ def detect_memory_save_command(text):
         ("add to finance memory", "finance_memory"),
         ("add this to finance memory", "finance_memory")
     ]
-
     for prefix, source in command_map:
         if lowered.startswith(prefix):
-            content = original[len(prefix):].lstrip(" :-\n\t")
+            content = original[len(prefix):].lstrip(" :=*-\n\t")
+            return {"source": source, "content": content}
+
+    # Extended phrase coverage with flexible separators.
+    # Examples:
+    # - remember in personal memory = test
+    # - save to personal memory: test
+    # - remember in insurance memory * note
+    # - save to document note test
+    # - add to project memory = note
+    patterns = [
+        (r"^(?:remember|save)\s+(?:in|to)\s+personal\s+memory(?:\s*[=:*]\s*|\s+)?(.*)$", "personal_memory"),
+        (r"^(?:remember|save)\s+(?:in|to)\s+insurance\s+memory(?:\s*[=:*]\s*|\s+)?(.*)$", "insurance"),
+        (r"^(?:remember|save)\s+(?:in|to)\s+document\s+note(?:\s*[=:*]\s*|\s+)?(.*)$", "document_note"),
+        (r"^(?:remember|save)\s+(?:in|to)\s+project\s+memory(?:\s*[=:*]\s*|\s+)?(.*)$", "project_note"),
+        (r"^(?:remember|save)\s+(?:in|to)\s+project\s+note(?:\s*[=:*]\s*|\s+)?(.*)$", "project_note"),
+        (r"^(?:remember|save)\s+(?:in|to)\s+finance\s+memory(?:\s*[=:*]\s*|\s+)?(.*)$", "finance_memory"),
+        (r"^add\s+to\s+project\s+memory(?:\s*[=:*]\s*|\s+)?(.*)$", "project_note"),
+    ]
+
+    for pattern, source in patterns:
+        match = re.match(pattern, original, flags=re.IGNORECASE)
+        if match:
+            content = (match.group(1) or "").strip(" :=*-\n\t")
             return {"source": source, "content": content}
 
     return None
@@ -298,4 +323,3 @@ def search_semantic_memory(
     except Exception as e:
         log_error("search_semantic_memory", e)
         return []
-
