@@ -22,6 +22,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import anthropic
+from services import memory_service
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -383,58 +384,30 @@ def save_to_supabase(user_message, assistant_response):
 
 
 def get_recent_memories():
-    try:
-        url = (
-            f"{SUPABASE_URL}/rest/v1/events_log"
-            f"?select=user_message,assistant_response"
-            f"&order=created_at.desc"
-            f"&limit={RECENT_EXCHANGE_LIMIT}"
-        )
-        result = requests.get(url, headers=supabase_headers, timeout=10)
-        return result.json() if result.status_code == 200 else []
-    except Exception as e:
-        log_system_error("get_recent_memories", e)
-        return []
+    return memory_service.get_recent_memories(
+        SUPABASE_URL,
+        supabase_headers,
+        RECENT_EXCHANGE_LIMIT,
+        log_system_error
+    )
 
 
 def save_personal_memory(memory_text):
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/personal_memory"
-        data = {
-            "memory_text": memory_text,
-            "memory_type": "general",
-            "importance": "medium",
-            "source": "telegram",
-            "is_active": True
-        }
-        result = requests.post(url, headers=supabase_headers, json=data, timeout=10)
-        if result.status_code in [200, 201, 204]:
-            return True
-
-        log_system_error(
-            "save_personal_memory",
-            RuntimeError(f"Supabase returned {result.status_code}: {result.text}")
-        )
-        return False
-    except Exception as e:
-        log_system_error("save_personal_memory", e)
-        return False
+    return memory_service.save_personal_memory(
+        memory_text,
+        SUPABASE_URL,
+        supabase_headers,
+        log_system_error
+    )
 
 
 def get_personal_memories():
-    try:
-        url = (
-            f"{SUPABASE_URL}/rest/v1/personal_memory"
-            f"?select=memory_text"
-            f"&is_active=eq.true"
-            f"&order=created_at.desc"
-            f"&limit={PERSONAL_MEMORY_LIMIT}"
-        )
-        result = requests.get(url, headers=supabase_headers, timeout=10)
-        return result.json() if result.status_code == 200 else []
-    except Exception as e:
-        log_system_error("get_personal_memories", e)
-        return []
+    return memory_service.get_personal_memories(
+        SUPABASE_URL,
+        supabase_headers,
+        PERSONAL_MEMORY_LIMIT,
+        log_system_error
+    )
 
 
 def detect_remember_command(message):
@@ -459,74 +432,15 @@ def generate_embedding(text):
 
 
 def looks_like_low_value_memory_text(content):
-    text = str(content or "").strip()
-    if not text:
-        return True
-
-    lowered = text.lower()
-    compact = re.sub(r"\s+", " ", lowered)
-
-    question_starts = (
-        "do you", "did you", "can you", "could you", "will you", "would you",
-        "what is", "what's", "where is", "when is", "why is", "how is",
-        "who is", "which", "shall i", "should i", "is it", "are you"
-    )
-    transient_commands = (
-        "system status", "show errors", "deploy status", "render status",
-        "last push", "github status", "gmail summary", "calendar summary",
-        "asana tasks", "finance report", "view finance profile", "show finance profile",
-        "search gmail", "find email", "email from", "most recent email", "latest email",
-        "read it", "draft email"
-    )
-
-    if compact.endswith("?") or compact.startswith(question_starts):
-        return True
-    if any(cmd in compact for cmd in transient_commands):
-        return True
-    if len(compact) < 12:
-        return True
-    return False
+    return memory_service.looks_like_low_value_memory_text(content)
 
 
 def should_store_semantic_memory(content, source):
-    src = str(source or "telegram").strip().lower()
-    text = str(content or "").strip()
-    if not text:
-        return False
-
-    # Keep document chunks and explicit memory sources.
-    durable_sources = {"pdf", "personal_memory", "insurance", "document_note", "project_note"}
-    if src in durable_sources:
-        return True
-
-    if src == "telegram" and looks_like_low_value_memory_text(text):
-        return False
-
-    return True
+    return memory_service.should_store_semantic_memory(content, source)
 
 
 def filter_semantic_results(results, query_text):
-    filtered = []
-    query = str(query_text or "").strip().lower()
-
-    for row in results or []:
-        content = str(row.get("content", "")).strip()
-        source = str(row.get("source", "")).strip().lower()
-        if not content:
-            continue
-
-        if source == "telegram" and looks_like_low_value_memory_text(content):
-            continue
-
-        # Avoid treating repeated questions as factual memory.
-        normalized = re.sub(r"\s+", " ", content.lower()).strip(" .!?")
-        query_norm = re.sub(r"\s+", " ", query).strip(" .!?")
-        if query_norm and normalized == query_norm:
-            continue
-
-        filtered.append(row)
-
-    return filtered
+    return memory_service.filter_semantic_results(results, query_text)
 
 
 def get_finance_summary():
@@ -545,22 +459,15 @@ def get_finance_summary():
 
 
 def save_semantic_memory(content, source="telegram"):
-    if not openai_client:
-        return
-
-    try:
-        if not should_store_semantic_memory(content, source):
-            return
-        embedding = generate_embedding(content)
-        url = f"{SUPABASE_URL}/rest/v1/semantic_memory"
-        data = {
-            "content": content,
-            "source": source,
-            "embedding": embedding
-        }
-        requests.post(url, headers=supabase_headers, json=data, timeout=10)
-    except Exception as e:
-        log_system_error("save_semantic_memory", e)
+    memory_service.save_semantic_memory(
+        content=content,
+        source=source,
+        openai_client=openai_client,
+        generate_embedding=generate_embedding,
+        supabase_url=SUPABASE_URL,
+        headers=supabase_headers,
+        log_error=log_system_error
+    )
 
 
 def get_memory_save_menu():
@@ -572,120 +479,70 @@ def get_memory_save_menu():
 
 
 def extract_prefixed_content(text, prefixes):
-    original = str(text or "").strip()
-    lowered = original.lower()
-    for prefix in prefixes:
-        if lowered.startswith(prefix):
-            return original[len(prefix):].lstrip(" :-\n\t")
-    return None
+    return memory_service.extract_prefixed_content(text, prefixes)
 
 
 def detect_memory_save_command(text):
-    original = str(text or "").strip()
-    lowered = original.lower()
-
-    command_map = [
-        ("add this to insurance memory", "insurance"),
-        ("add to insurance memory", "insurance"),
-        ("remember this", "personal_memory"),
-        ("save this", "personal_memory"),
-        ("add this to document note", "document_note"),
-        ("add this to project note", "project_note"),
-        ("add to project note", "project_note"),
-        ("add to finance memory", "finance_memory"),
-        ("add this to finance memory", "finance_memory")
-    ]
-
-    for prefix, source in command_map:
-        if lowered.startswith(prefix):
-            content = original[len(prefix):].lstrip(" :-\n\t")
-            return {"source": source, "content": content}
-
-    return None
+    return memory_service.detect_memory_save_command(text)
 
 
 def detect_memory_recall_topic(text):
-    lowered = str(text or "").strip().lower()
-    patterns = [
-        r"^what do you remember about\s+(.+)$",
-        r"^what do you remember on\s+(.+)$",
-        r"^remember anything about\s+(.+)$"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, lowered)
-        if match:
-            return match.group(1).strip(" ?.!,;:")
-    return None
+    return memory_service.detect_memory_recall_topic(text)
 
 
 def is_read_it_request(text):
-    lowered = str(text or "").strip().lower()
-    return lowered.startswith("read it")
+    return memory_service.is_read_it_request(text)
 
 
 def summarize_read_request_content(content):
-    try:
-        limited = truncate_text(content, max_length=6000, preserve_newlines=True)
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=450,
-            system=(
-                "Summarize pasted text for Telegram. "
-                "Use short sections: Summary, Key Points, Suggested Next Step. "
-                "Do not claim data was saved."
-            ),
-            messages=[{"role": "user", "content": limited}]
-        )
-        return response.content[0].text
-    except Exception as e:
-        log_system_error("summarize_read_request_content", e)
-        return "I could not summarize that text right now."
+    return memory_service.summarize_read_request_content(
+        content=content,
+        truncate_text=truncate_text,
+        client=client,
+        claude_model=CLAUDE_MODEL,
+        log_error=log_system_error
+    )
 
 
 def clear_memory_intent_state(context):
-    context.user_data.pop(WAITING_FOR_READ_IT_CONTENT, None)
-    context.user_data.pop(WAITING_FOR_MEMORY_CONTENT, None)
-    context.user_data.pop(MEMORY_CAPTURE_STATE, None)
-    context.user_data.pop(MEMORY_PENDING_SAVE_STATE, None)
+    memory_service.clear_memory_intent_state(
+        context,
+        (
+            WAITING_FOR_READ_IT_CONTENT,
+            WAITING_FOR_MEMORY_CONTENT,
+            MEMORY_CAPTURE_STATE,
+            MEMORY_PENDING_SAVE_STATE
+        )
+    )
 
 
 def is_blocked_finance_memory_source(source):
-    return str(source or "").strip().lower() in {"finance", "finance_memory"}
+    return memory_service.is_blocked_finance_memory_source(source)
 
 
 def is_source_allowed_for_finance_like_content(source):
-    src = str(source or "").strip().lower()
-    return src in {"document_note", "insurance", "project_note", "pdf"}
+    return memory_service.is_source_allowed_for_finance_like_content(source)
 
 
 def should_block_memory_save_for_finance_profile(content, source):
-    if is_blocked_finance_memory_source(source):
-        return True
-    if is_source_allowed_for_finance_like_content(source):
-        return False
-    return is_critical_finance_capture_request(content)
+    return memory_service.should_block_memory_save_for_finance_profile(
+        content,
+        source,
+        is_critical_finance_capture_request
+    )
 
 
 def save_explicit_memory_content(content, source):
-    text = str(content or "").strip()
-    if not text:
-        return False
-    if should_block_memory_save_for_finance_profile(text, source):
-        return False
-    save_semantic_memory(text, source=source)
-    return True
+    return memory_service.save_explicit_memory_content(
+        content=content,
+        source=source,
+        should_block_memory_save_for_finance_profile=should_block_memory_save_for_finance_profile,
+        save_semantic_memory=save_semantic_memory
+    )
 
 
 def format_memory_recall_response(topic, results):
-    if not results:
-        return f"I do not have saved memory entries for '{topic}' yet."
-
-    lines = [f"Memory recall for '{topic}':", ""]
-    for idx, row in enumerate(results[:5], start=1):
-        source = row.get("source") or "memory"
-        content = truncate_text(row.get("content", ""), max_length=220, preserve_newlines=False)
-        lines.append(f"{idx}. [{source}] {content}")
-    return "\n".join(lines)
+    return memory_service.format_memory_recall_response(topic, results, truncate_text)
 
 
 def save_document_metadata(doc_data):
@@ -717,22 +574,15 @@ def get_uploaded_documents(limit=5):
 
 
 def search_semantic_memory(query):
-    if not openai_client:
-        return []
-
-    try:
-        embedding = generate_embedding(query)
-        url = f"{SUPABASE_URL}/rest/v1/rpc/match_semantic_memory"
-        data = {
-            "query_embedding": embedding,
-            "match_threshold": 0.70,
-            "match_count": SEMANTIC_MEMORY_MATCH_COUNT
-        }
-        result = requests.post(url, headers=supabase_headers, json=data, timeout=10)
-        return result.json() if result.status_code == 200 else []
-    except Exception as e:
-        log_system_error("search_semantic_memory", e)
-        return []
+    return memory_service.search_semantic_memory(
+        query=query,
+        openai_client=openai_client,
+        generate_embedding=generate_embedding,
+        supabase_url=SUPABASE_URL,
+        headers=supabase_headers,
+        semantic_memory_match_count=SEMANTIC_MEMORY_MATCH_COUNT,
+        log_error=log_system_error
+    )
 
 
 def classify_finance_message(message):
