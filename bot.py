@@ -999,6 +999,86 @@ def is_critical_finance_capture_request(text):
     return has_future_signal and has_finance_context
 
 
+def is_finance_profile_line(text):
+    line = str(text or "").strip()
+    if not line:
+        return False
+    lowered = line.lower()
+    direct_keywords = ("salary", "rent", "emi", "loan", "savings goal", "future plan")
+    if any(keyword in lowered for keyword in direct_keywords):
+        return True
+    return is_critical_finance_capture_request(line)
+
+
+def extract_personal_fact(line):
+    text = str(line or "").strip()
+    lowered = text.lower()
+
+    patterns = [
+        (r"^(?:my name is|i am)\s+(.+)$", "Name"),
+        (r"^(?:i live in|my location is)\s+(.+)$", "Location"),
+        (r"^(?:i am|my role is|i work as)\s+(.+)$", "Job role"),
+        (r"^(?:my dob is|my date of birth is|dob is)\s+(.+)$", "DOB")
+    ]
+
+    for pattern, label in patterns:
+        match = re.search(pattern, lowered, flags=re.IGNORECASE)
+        if match:
+            value = text[match.start(1):].strip(" .")
+            if value:
+                return {"label": label, "value": value, "line": text}
+
+    return None
+
+
+def split_personal_and_finance_lines(message):
+    lines = [line.strip() for line in str(message or "").splitlines() if line.strip()]
+    finance_lines = []
+    personal_facts = []
+
+    for line in lines:
+        if is_finance_profile_line(line):
+            finance_lines.append(line)
+            continue
+        fact = extract_personal_fact(line)
+        if fact:
+            personal_facts.append(fact)
+
+    return {"personal_facts": personal_facts, "finance_lines": finance_lines}
+
+
+def save_personal_facts_with_finance_guard(message):
+    split = split_personal_and_finance_lines(message)
+    personal_facts = split["personal_facts"]
+    finance_lines = split["finance_lines"]
+
+    saved_facts = []
+    for fact in personal_facts:
+        memory_text = f"{fact['label']}: {fact['value']}"
+        saved_personal = save_personal_memory(memory_text)
+        saved_semantic = save_explicit_memory_content(memory_text, "personal_memory")
+        if saved_personal and saved_semantic:
+            saved_facts.append(fact)
+
+    if not finance_lines:
+        return None
+
+    lines = []
+    if saved_facts:
+        lines.extend(["Saved:"])
+        for fact in saved_facts:
+            lines.append(f"- {fact['label']}: {fact['value']}")
+    else:
+        lines.extend(["Saved:", "- No safe personal facts found to save."])
+
+    lines.extend(["", "Not saved:"])
+    for blocked in finance_lines:
+        lines.append(f"- {blocked}")
+
+    lines.extend(["", "For salary, use Finance Setup -> Set Monthly Salary."])
+    return "\n".join(lines)
+
+
 def is_finance_profile_question(text):
     lowered = str(text or "").lower().strip()
     if not lowered:
@@ -4345,6 +4425,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     # Consolidated automated detection for user messages
     if not is_internal:
         if is_critical_finance_capture_request(user_message) and not is_read_it_request(user_message):
+            mixed_reply = save_personal_facts_with_finance_guard(user_message)
+            if mixed_reply:
+                await send_clean_reply(update.message, mixed_reply, reply_markup=get_finance_setup_menu())
+                return
             reply = (
                 "For safety, I do not save salary/rent/EMI/goals/future plans from casual text.\n"
                 "Use Finance Setup and confirm with ✅ Save."
