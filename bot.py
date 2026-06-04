@@ -23,6 +23,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 import anthropic
 from services import memory_service
+from services import finance_service
+from services import document_service
+from services import assistant_service
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -444,18 +447,11 @@ def filter_semantic_results(results, query_text):
 
 
 def get_finance_summary():
-    """Aggregates balance and monthly spending for AI context."""
-    try:
-        # Using your existing breakdown/overspending logic to feed the AI context
-        spending = get_monthly_spending_breakdown()
-        insights = get_overspending_insights()
-        return json.dumps({
-            "monthly_breakdown": json.loads(spending) if "failed" not in spending else spending,
-            "insights": json.loads(insights) if "failed" not in insights else insights
-        }, indent=2)
-    except Exception as e:
-        log_system_error("get_finance_summary", e)
-        return "Finance summary unavailable."
+    return finance_service.get_finance_summary(
+        get_monthly_spending_breakdown,
+        get_overspending_insights,
+        log_system_error
+    )
 
 
 def save_semantic_memory(content, source="telegram"):
@@ -742,6 +738,10 @@ def parse_finance_amount(text):
         return round(value, 2)
     except Exception:
         return None
+
+
+def parse_due_day_input(text):
+    return finance_service.parse_due_day_input(text)
 
 
 def format_eur(amount):
@@ -3793,13 +3793,10 @@ async def handle_finance_foundation_flow(update, context, user_message, is_voice
             await send_clean_reply(update.message, "Enter due day in month (1-31), or type skip.")
             return True
         if step == "due_day":
-            due_day = None
-            if text != "skip":
-                match = re.search(r"\b([1-9]|[12][0-9]|3[01])\b", text)
-                if not match:
-                    await send_clean_reply(update.message, "Please enter a valid day 1-31, or type skip.")
-                    return True
-                due_day = int(match.group(1))
+            is_valid_due_day, due_day = parse_due_day_input(text)
+            if not is_valid_due_day:
+                await send_clean_reply(update.message, "Please enter a valid day 1-31, or type skip.")
+                return True
             commitment_type = "emi_loan" if kind == "add_emi" else "recurring_bill"
             summary = (
                 f"I understood: {data.get('name')} = {format_eur(data.get('amount'))} monthly"
@@ -4448,11 +4445,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
     if semantic_results:
         semantic_context = f"\nRelevant semantic memories: {compact_json(semantic_results)}"
 
-    runtime_context = f"""
-Current date/time:
-{get_current_datetime()}
-Timezone: {TIMEZONE_NAME}
-"""
+    runtime_context = build_runtime_context()
 
     personal_memories = get_personal_memories()
     personal_memory_context = ""
@@ -4462,29 +4455,15 @@ Timezone: {TIMEZONE_NAME}
 
     live_context = build_live_context(text)
 
-    # Recent conversation history
     recent_memories = get_recent_memories()
-    conversation_history = []
-    for memory in reversed(recent_memories):
-        conversation_history.append({"role": "user", "content": memory["user_message"]})
-        conversation_history.append({"role": "assistant", "content": memory["assistant_response"]})
-    conversation_history.append({"role": "user", "content": user_message})
-
-    # Query Claude
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=900,
-        system=(
-            SYSTEM_PROMPT
-            + runtime_context
-            + semantic_context
-            + personal_memory_context
-            + live_context
-        ),
-        messages=conversation_history
+    conversation_history = build_conversation_history(recent_memories, user_message)
+    reply = query_assistant_response(
+        runtime_context,
+        semantic_context,
+        personal_memory_context,
+        live_context,
+        conversation_history
     )
-
-    reply = response.content[0].text
     save_to_supabase(user_message, reply)
     await send_clean_reply(update.message, reply, reply_markup=get_read_aloud_markup())
     if is_voice_input and voice_replies_enabled:
@@ -4529,13 +4508,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(temp_path)
 
         # Extract full text from PDF
-        text_content = ""
-        page_count = 0
-        with open(temp_path, "rb") as f:
-            reader = pypdf.PdfReader(f)
-            page_count = len(reader.pages)
-            for page in reader.pages:
-                text_content += page.extract_text() or ""
+        text_content, page_count = extract_pdf_text_from_path(temp_path)
 
         if not text_content.strip():
             await status_msg.edit_text(
@@ -4545,8 +4518,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Split text into chunks of 8,000 characters
-        chunk_size = 8000
-        chunks = [text_content[i:i + chunk_size] for i in range(0, len(text_content), chunk_size)]
+        chunks = split_document_chunks(text_content, chunk_size=8000)
         
         await status_msg.edit_text(f"Storing {len(chunks)} chunks in semantic memory...")
 
@@ -4555,26 +4527,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_semantic_memory(chunk, source="pdf")
 
         # Save metadata
-        doc_data = {
-            "filename": doc.file_name,
-            "telegram_file_id": doc.file_id,
-            "document_type": "pdf",
-            "source": "telegram",
-            "page_count": page_count,
-            "semantic_chunk_count": len(chunks),
-            "storage_status": "processed",
-            "extracted_text_summary": truncate_text(text_content, 1000)
-        }
+        doc_data = build_document_metadata_payload(
+            filename=doc.file_name,
+            file_id=doc.file_id,
+            page_count=page_count,
+            chunks=chunks,
+            text_content=text_content
+        )
         save_document_metadata(doc_data)
 
         # Create a short summary from only the first 2 chunks
-        summary_text = "\n".join(chunks[:2])
-        processing_prompt = (
-            "The uploaded document has been preserved as a document record and split into searchable semantic chunks for later retrieval. "
-            "Based *only* on the following opening segments, provide a concise overview of what this document is about. "
-            "If it is German A1 learning material, identify the main topics.\n\n"
-            f"Segments:\n{truncate_text(summary_text, 16000, preserve_newlines=True)}"
-        )
+        processing_prompt = build_document_processing_prompt(chunks)
 
         await status_msg.edit_text("Generating summary...")
         await handle_message(update, context, overridden_text=processing_prompt, is_internal=True)
@@ -4592,6 +4555,50 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+def extract_pdf_text_from_path(pdf_path):
+    return document_service.extract_pdf_text_from_path(pdf_path)
+
+
+def split_document_chunks(text_content, chunk_size=8000):
+    return document_service.split_document_chunks(text_content, chunk_size=chunk_size)
+
+
+def build_document_metadata_payload(filename, file_id, page_count, chunks, text_content):
+    return document_service.build_document_metadata_payload(
+        filename=filename,
+        file_id=file_id,
+        page_count=page_count,
+        chunks=chunks,
+        text_content=text_content,
+        truncate_text=truncate_text
+    )
+
+
+def build_document_processing_prompt(chunks):
+    return document_service.build_document_processing_prompt(chunks, truncate_text)
+
+
+def build_runtime_context():
+    return assistant_service.build_runtime_context(get_current_datetime(), TIMEZONE_NAME)
+
+
+def build_conversation_history(recent_memories, user_message):
+    return assistant_service.build_conversation_history(recent_memories, user_message)
+
+
+def query_assistant_response(runtime_context, semantic_context, personal_memory_context, live_context, conversation_history):
+    return assistant_service.query_assistant_response(
+        client=client,
+        model=CLAUDE_MODEL,
+        system_prompt=SYSTEM_PROMPT,
+        runtime_context=runtime_context,
+        semantic_context=semantic_context,
+        personal_memory_context=personal_memory_context,
+        live_context=live_context,
+        conversation_history=conversation_history
+    )
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
