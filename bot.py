@@ -947,6 +947,80 @@ def is_finance_profile_question(text):
     return any(re.search(pattern, normalized) for pattern in explicit_patterns)
 
 
+def is_finance_advisory_request(text):
+    return finance_service.is_finance_advisory_request(text)
+
+
+def get_latest_explicit_salary_day_from_conversation(current_message):
+    explicit = finance_service.extract_explicit_salary_day(current_message)
+    if explicit is not None:
+        return explicit
+
+    recent = get_recent_memories()
+    for row in recent:
+        candidate = str(row.get("user_message") or "")
+        explicit = finance_service.extract_explicit_salary_day(candidate)
+        if explicit is not None:
+            return explicit
+
+    return None
+
+
+def get_finance_advisory_baseline(current_message):
+    profile = get_financial_profile_row()
+    commitments = fetch_finance_rows(
+        "financial_commitments",
+        select_columns="name,amount,commitment_type,status,due_day",
+        limit=200
+    )
+
+    monthly_salary = float(profile.get("monthly_salary") or 0)
+    monthly_rent = float(profile.get("monthly_rent") or 0)
+
+    fixed_expenses = monthly_rent
+    recurring_income = 0.0
+    credit_card_liability = 0.0
+    expected_next_card_statement = 0.0
+
+    for row in commitments:
+        if str(row.get("status") or "active").lower() != "active":
+            continue
+        amount = float(row.get("amount") or 0)
+        ctype = str(row.get("commitment_type") or "").lower()
+        name = str(row.get("name") or "").lower()
+        is_income = "income" in ctype
+        if is_income:
+            recurring_income += amount
+        else:
+            fixed_expenses += amount
+        if any(token in name for token in ("credit card", "card bill", "advanzia")) or "credit" in ctype:
+            credit_card_liability += amount
+
+    if credit_card_liability:
+        expected_next_card_statement = credit_card_liability
+    explicit_salary_day = get_latest_explicit_salary_day_from_conversation(current_message)
+    salary_payday_day = explicit_salary_day if explicit_salary_day is not None else 15
+
+    return {
+        "monthly_income": round(monthly_salary + recurring_income, 2),
+        "fixed_expenses": round(fixed_expenses, 2),
+        "salary_window": (12, 15),
+        "salary_payday_day": salary_payday_day,
+        "credit_card_liability": round(credit_card_liability, 2),
+        "expected_next_card_statement": round(expected_next_card_statement, 2)
+    }
+
+
+def build_finance_advisory_reply(text):
+    return finance_service.build_finance_advisory_reply(
+        text=text,
+        timezone=get_timezone(),
+        parse_finance_amount=parse_finance_amount,
+        format_eur=format_eur,
+        baseline=get_finance_advisory_baseline(text)
+    )
+
+
 def set_finance_pending_confirmation(context, action, payload, summary, edit_state=None, edit_prompt=None):
     context.user_data[FINANCE_PENDING_CONFIRM] = {
         "action": action,
@@ -4267,6 +4341,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, ove
             lines.append("")
 
         await send_clean_reply(update.message,"\n".join(lines).strip())
+        return
+
+    if is_finance_advisory_request(user_message):
+        advisory_reply = build_finance_advisory_reply(user_message)
+        if not advisory_reply:
+            advisory_reply = (
+                "I can analyze this in advisory mode (read-only), but I need income/expense details with amounts.\n"
+                "Share a block like:\n"
+                "Income: Salary 2950\n"
+                "Expenses: Rent 870, EMI 190"
+            )
+        await send_clean_reply(update.message, advisory_reply, reply_markup=get_main_menu())
+        if is_voice_input and voice_replies_enabled:
+            await send_voice_reply(update, advisory_reply)
         return
 
     # Consolidated automated detection for user messages

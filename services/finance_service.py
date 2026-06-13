@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import datetime
+from datetime import date
 
 import requests
 
@@ -849,3 +850,520 @@ def parse_due_day_input(text):
         return False, None
     return True, int(match.group(1))
 
+
+def _is_income_heading(line):
+    lowered = line.lower()
+    return lowered in {"income", "income-", "income:"} or lowered.startswith("income")
+
+
+def _is_expense_heading(line):
+    lowered = line.lower()
+    return lowered in {"expenses", "expense", "expenses-", "expense-", "expenses:", "expense:"} or lowered.startswith("expenses")
+
+
+def _extract_label_amount(line, parse_finance_amount):
+    patterns = [
+        r"^(?:[-*•]\s*)?(.+?)\s*[:=\-]\s*(€?\s*\d[\d.,]*)\s*$"
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, line.strip(), flags=re.IGNORECASE)
+        if not match:
+            continue
+        label = match.group(1).strip(" -:\t")
+        amount = parse_finance_amount(match.group(2))
+        if label and amount is not None:
+            return label, amount
+    return None, None
+
+
+def parse_salary_credit_window(text):
+    lowered = str(text or "").lower()
+    between_match = re.search(
+        r"salary.*between\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?\s*(?:and|to|-)\s*(\d{1,2})(?:st|nd|rd|th)?",
+        lowered
+    )
+    if between_match:
+        start = int(between_match.group(1))
+        end = int(between_match.group(2))
+        if start > end:
+            start, end = end, start
+        return max(1, min(start, 31)), max(1, min(end, 31))
+
+    on_match = re.search(r"salary.*(?:on|by)\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?", lowered)
+    if on_match:
+        day = max(1, min(int(on_match.group(1)), 31))
+        return day, day
+
+    return 12, 15
+
+
+def extract_explicit_salary_day(text):
+    lowered = str(text or "").lower()
+    explicit_patterns = (
+        r"salary\s+(?:is\s+)?credited\s+on\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?",
+        r"salary\s+(?:came|comes)\s+on\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?",
+        r"salary\s+(?:will\s+come|expected)\s+on\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?",
+        r"salary\s+expected\s+on\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?"
+    )
+    for pattern in explicit_patterns:
+        match = re.search(pattern, lowered)
+        if match:
+            day = int(match.group(1))
+            return max(1, min(day, 31))
+    return None
+
+
+def parse_credit_card_snapshot(text, expense_items, parse_finance_amount):
+    lowered = str(text or "").lower()
+
+    statement_day = None
+    payment_due_day = None
+    current_statement_amount = None
+    expected_next_statement_amount = None
+
+    statement_match = re.search(
+        r"statement(?:\s+generated)?(?:\s+on|\s+around)?\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?",
+        lowered
+    )
+    if statement_match:
+        statement_day = int(statement_match.group(1))
+
+    due_match = re.search(
+        r"(?:payment\s+due|due\s+date|bill\s+due)\s+(?:on\s+)?(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?",
+        lowered
+    )
+    if due_match:
+        payment_due_day = int(due_match.group(1))
+
+    current_match = re.search(
+        r"(?:credit\s*card\s*(?:bill|statement)|current\s+statement(?:\s+amount)?)\D{0,20}(\d[\d.,]*)",
+        lowered
+    )
+    if current_match:
+        current_statement_amount = parse_finance_amount(current_match.group(1))
+
+    expected_match = re.search(
+        r"(?:expected|next)\s+(?:credit\s*card\s+)?statement(?:\s+amount)?\D{0,20}(\d[\d.,]*)",
+        lowered
+    )
+    if expected_match:
+        expected_next_statement_amount = parse_finance_amount(expected_match.group(1))
+
+    if current_statement_amount is None:
+        for item in expense_items:
+            label = item["label"].lower()
+            if "credit card" in label or "card bill" in label:
+                current_statement_amount = item["amount"]
+                break
+
+    if expected_next_statement_amount is None and current_statement_amount is not None:
+        expected_next_statement_amount = current_statement_amount
+
+    has_card_context = (
+        "credit card" in lowered
+        or "statement" in lowered
+        or any("credit card" in item["label"].lower() for item in expense_items)
+    )
+    if not has_card_context:
+        return None
+
+    return {
+        "statement_day": statement_day,
+        "payment_due_day": payment_due_day,
+        "current_statement_amount": current_statement_amount,
+        "expected_next_statement_amount": expected_next_statement_amount
+    }
+
+
+def parse_finance_snapshot_text(text, parse_finance_amount):
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return {"income_items": [], "expense_items": [], "salary_window": (12, 15), "credit_card": None}
+
+    section = None
+    income_items = []
+    expense_items = []
+
+    income_hints = ("salary", "income", "allowance", "bonus", "refund", "credit", "pension")
+    expense_hints = (
+        "rent", "bill", "loan", "emi", "insurance", "tax", "expense",
+        "registration", "fuel", "groceries", "payment", "debt", "card"
+    )
+
+    for raw in lines:
+        line = raw.strip(" -*•\t")
+        if not line:
+            continue
+
+        if _is_income_heading(line):
+            section = "income"
+            continue
+        if _is_expense_heading(line):
+            section = "expense"
+            continue
+
+        label, amount = _extract_label_amount(line, parse_finance_amount)
+        if amount is None:
+            continue
+
+        lowered_label = label.lower()
+        item = {"label": label, "amount": amount}
+
+        if section == "income":
+            income_items.append(item)
+        elif section == "expense":
+            expense_items.append(item)
+        elif any(hint in lowered_label for hint in income_hints):
+            income_items.append(item)
+        elif any(hint in lowered_label for hint in expense_hints):
+            expense_items.append(item)
+
+    salary_window = parse_salary_credit_window(text)
+    credit_card = parse_credit_card_snapshot(text, expense_items, parse_finance_amount)
+    return {
+        "income_items": income_items,
+        "expense_items": expense_items,
+        "salary_window": salary_window,
+        "credit_card": credit_card
+    }
+
+
+def is_finance_advisory_request(text):
+    lowered = str(text or "").lower().strip()
+    if not lowered:
+        return False
+
+    advisory_phrases = (
+        "what's your understanding", "whats your understanding", "understanding of this",
+        "can i afford", "can i spend", "if i pay", "how much will i have left", "how much do i have left",
+        "cash flow", "until payday", "before payday", "next salary", "payday",
+        "credit card statement", "future liability", "projected balance", "surplus", "deficit",
+        "buy this now", "should i wait until salary"
+    )
+    if any(phrase in lowered for phrase in advisory_phrases):
+        return True
+
+    has_income_expense_words = "income" in lowered and ("expenses" in lowered or "expense" in lowered)
+    has_multiple_numbers = len(re.findall(r"\d[\d.,]*", lowered)) >= 3
+    return has_income_expense_words and has_multiple_numbers
+
+
+def parse_affordability_request(text, parse_finance_amount):
+    lowered = str(text or "").lower()
+    amount = None
+    intent_amount_patterns = (
+        r"(?:afford|spend|pay|buy|purchase|book|booking)\D{0,20}(€?\s*\d[\d.,]*)",
+        r"(€\s*\d[\d.,]*)"
+    )
+    for pattern in intent_amount_patterns:
+        matches = re.findall(pattern, lowered)
+        if matches:
+            candidate = parse_finance_amount(matches[-1])
+            if candidate is not None:
+                amount = candidate
+                break
+    if amount is None:
+        numeric_tokens = re.findall(r"\d[\d.,]*", lowered)
+        parsed_values = []
+        for token in numeric_tokens:
+            parsed = parse_finance_amount(token)
+            if parsed is not None:
+                parsed_values.append(parsed)
+        if parsed_values:
+            filtered = [v for v in parsed_values if v > 31]
+            amount = max(filtered) if filtered else max(parsed_values)
+
+    category_map = {
+        "washing machine": "home appliance",
+        "hotel": "travel",
+        "booking": "travel",
+        "advanzia": "credit card",
+        "grocer": "groceries",
+        "fuel": "transport",
+        "car": "transport",
+        "insurance": "insurance",
+        "emi": "debt"
+    }
+    category = "general"
+    for keyword, label in category_map.items():
+        if keyword in lowered:
+            category = label
+            break
+    essential_keywords = (
+        "rent", "emi", "loan", "insurance", "electricity", "light bill",
+        "mobile bill", "tax", "medicine", "groceries", "food", "school"
+    )
+    is_essential = any(token in lowered for token in essential_keywords) or category in {"insurance", "debt", "groceries"}
+
+    timing = "this_month"
+    if "before salary" in lowered or "until salary" in lowered or "before payday" in lowered:
+        timing = "before_salary"
+    elif "next month" in lowered:
+        timing = "next_month"
+    elif "now" in lowered:
+        timing = "now"
+
+    payment_method = "cash_or_bank"
+    if any(word in lowered for word in ("card", "credit card", "advanzia")):
+        payment_method = "credit_card"
+
+    action_type = "purchase"
+    if re.search(r"\bpay\b", lowered) and any(token in lowered for token in ("advanzia", "credit card", "card bill", "statement")):
+        action_type = "card_bill_payment"
+        payment_method = "cash_or_bank"
+
+    return {
+        "amount": amount,
+        "category": category,
+        "timing": timing,
+        "payment_method": payment_method,
+        "action_type": action_type,
+        "is_essential": is_essential
+    }
+
+
+def classify_risk_level(value, forces_credit_dependency=False):
+    if value < 0 or forces_credit_dependency:
+        return "critical"
+    if value < 200:
+        return "risky"
+    if value <= 500:
+        return "tight"
+    return "safe"
+
+
+def build_recommendation(risk_level, payment_method, action_type, timing, is_essential=False):
+    if risk_level == "safe":
+        if payment_method == "credit_card" and action_type == "purchase":
+            return "buy now (card is fine, but next statement will be higher)"
+        return "buy now"
+    if risk_level == "tight":
+        if is_essential and timing != "before_salary":
+            return "pay partially"
+        if is_essential and timing == "before_salary":
+            return "wait until salary"
+        if timing == "before_salary":
+            return "wait until salary"
+        return "wait until salary"
+    if risk_level == "risky":
+        if is_essential or action_type == "card_bill_payment":
+            return "pay partially"
+        return "avoid this month"
+    if action_type == "card_bill_payment":
+        return "pay partially"
+    return "avoid this month (do not buy or pay full amount now)"
+    if risk_level == "safe":
+        return "Looks affordable with current numbers and a reasonable buffer."
+    if risk_level == "tight":
+        return "Possible, but buffer is tight. Prefer delaying or reducing the amount."
+    return "High pressure on cash flow. Better to wait until salary or reduce spending."
+
+
+def _next_date_with_day(today, target_day):
+    try:
+        candidate = date(today.year, today.month, target_day)
+    except ValueError:
+        candidate = date(today.year, today.month, 28)
+    if candidate >= today:
+        return candidate
+    next_month = today.month + 1
+    next_year = today.year
+    if next_month > 12:
+        next_month = 1
+        next_year += 1
+    try:
+        return date(next_year, next_month, target_day)
+    except ValueError:
+        return date(next_year, next_month, 28)
+
+
+def build_finance_advisory_reply(text, timezone, parse_finance_amount, format_eur, baseline=None):
+    snapshot = parse_finance_snapshot_text(text, parse_finance_amount)
+    income_items = snapshot["income_items"]
+    expense_items = snapshot["expense_items"]
+    if not income_items and not expense_items and not snapshot.get("credit_card") and not baseline:
+        return None
+
+    baseline_income = float((baseline or {}).get("monthly_income") or 0)
+    baseline_fixed_expenses = float((baseline or {}).get("fixed_expenses") or 0)
+    baseline_salary_window = (baseline or {}).get("salary_window") or (12, 15)
+    baseline_payday_day = int((baseline or {}).get("salary_payday_day") or 15)
+    baseline_card_liability = float((baseline or {}).get("credit_card_liability") or 0)
+    baseline_next_card = float((baseline or {}).get("expected_next_card_statement") or baseline_card_liability)
+
+    monthly_income = round(sum(item["amount"] for item in income_items), 2) if income_items else round(baseline_income, 2)
+    monthly_expenses = round(sum(item["amount"] for item in expense_items), 2) if expense_items else round(baseline_fixed_expenses, 2)
+    monthly_left = round(monthly_income - monthly_expenses, 2)
+
+    now = datetime.now(timezone).date()
+    salary_start, salary_end = baseline_salary_window
+    calculation_payday_day = baseline_payday_day
+    salary_day_source = "default"
+
+    explicit_from_text = extract_explicit_salary_day(text)
+    if explicit_from_text is not None:
+        calculation_payday_day = explicit_from_text
+        salary_start, salary_end = explicit_from_text, explicit_from_text
+        salary_day_source = "explicit_current_message"
+    else:
+        window_from_text = snapshot.get("salary_window")
+        if window_from_text and tuple(window_from_text) != (12, 15):
+            salary_start, salary_end = window_from_text
+            calculation_payday_day = max(1, min(int(salary_end), 31))
+            salary_day_source = "range_from_text"
+        elif baseline_payday_day != 15:
+            calculation_payday_day = baseline_payday_day
+            salary_start, salary_end = baseline_salary_window
+            salary_day_source = "explicit_recent_message"
+
+    next_payday = _next_date_with_day(now, calculation_payday_day)
+    days_until_payday = max((next_payday - now).days, 0)
+    daily_burn = round(monthly_expenses / 30, 2) if monthly_expenses > 0 else 0.0
+    needed_until_payday = round(daily_burn * days_until_payday, 2)
+    cushion_until_payday = round(monthly_left - needed_until_payday, 2)
+
+    lines = [
+        "💼 Finance Advisory (Read-only)",
+        "No values were saved. This is analysis only.",
+        "",
+        "📊 Monthly cash-flow",
+        f"- Total income: {format_eur(monthly_income)}",
+        f"- Total fixed expenses: {format_eur(monthly_expenses)}",
+        f"- Expected monthly left: {format_eur(monthly_left)}"
+    ]
+
+    lines.extend([
+        "",
+        "⏳ Until payday view",
+        f"- Salary usually expected between day {baseline_salary_window[0]} and day {baseline_salary_window[1]}",
+        f"- Calculation payday used: day {calculation_payday_day}",
+        f"- Days until payday: {days_until_payday}",
+        f"- Estimated burn until payday: {format_eur(needed_until_payday)}",
+        f"- Estimated cushion until payday: {format_eur(cushion_until_payday)}"
+    ])
+    if salary_day_source == "explicit_current_message":
+        lines.append("- Salary date source: explicit date from your current message.")
+    elif salary_day_source == "explicit_recent_message":
+        lines.append("- Salary date source: latest explicit date from recent conversation.")
+    elif salary_day_source == "range_from_text":
+        lines.append("- Salary date source: range mentioned in your text; using conservative end of range.")
+    else:
+        lines.append("- Salary date source: default conservative day 15.")
+    if cushion_until_payday < 0:
+        lines.append("- Health: 🔴 Cash-pressure risk before payday.")
+    elif cushion_until_payday < 250:
+        lines.append("- Health: 🟠 Tight buffer before payday.")
+    else:
+        lines.append("- Health: 🟢 Buffer looks manageable.")
+
+    credit_card = snapshot.get("credit_card")
+    current_card_liability = baseline_card_liability
+    expected_next_card_statement = baseline_next_card
+    if credit_card:
+        if credit_card.get("current_statement_amount") is not None:
+            current_card_liability = float(credit_card.get("current_statement_amount") or 0)
+        if credit_card.get("expected_next_statement_amount") is not None:
+            expected_next_card_statement = float(credit_card.get("expected_next_statement_amount") or 0)
+        lines.extend(["", "💳 Credit-card outlook"])
+        statement_day = credit_card.get("statement_day")
+        if statement_day:
+            next_statement_date = _next_date_with_day(now, statement_day)
+            lines.append(f"- Statement day: {statement_day} (next: {next_statement_date.isoformat()})")
+        else:
+            lines.append("- Statement day: not specified")
+
+        due_day = credit_card.get("payment_due_day")
+        if due_day:
+            lines.append(f"- Payment due day: {due_day}")
+
+        current_amount = current_card_liability
+        expected_next = expected_next_card_statement
+        if current_amount:
+            lines.append(f"- Current statement amount: {format_eur(current_amount)}")
+        if expected_next:
+            lines.append(f"- Expected next statement: {format_eur(expected_next)}")
+            future_left = round(monthly_left - float(expected_next), 2)
+            lines.append(f"- Future liability impact: monthly left after statement ≈ {format_eur(future_left)}")
+
+        lines.append("- Note: current spending typically appears on a future statement cycle.")
+    elif current_card_liability or expected_next_card_statement:
+        lines.extend([
+            "",
+            "💳 Credit-card outlook",
+            f"- Current statement amount: {format_eur(current_card_liability)}",
+            f"- Expected next statement: {format_eur(expected_next_card_statement)}",
+            "- Note: current spending typically appears on a future statement cycle."
+        ])
+
+    lowered = str(text or "").lower()
+    if any(phrase in lowered for phrase in ("can i afford", "can i spend", "can i buy", "how much will i have left", "how much do i have left", "should i wait until salary", "if i pay")):
+        intent = parse_affordability_request(text, parse_finance_amount)
+        amount = intent.get("amount")
+        if amount:
+            action_type = intent["action_type"]
+            payment_method = intent["payment_method"]
+
+            immediate_before_salary_impact = amount
+            next_statement_delta = 0.0
+
+            if action_type == "purchase" and payment_method == "credit_card":
+                immediate_before_salary_impact = 0.0
+                next_statement_delta = amount
+            elif action_type == "card_bill_payment":
+                immediate_before_salary_impact = amount
+                next_statement_delta = -min(amount, expected_next_card_statement or 0.0)
+
+            available_balance_estimate = round(monthly_left - immediate_before_salary_impact, 2)
+            before_payday_balance = round(cushion_until_payday - immediate_before_salary_impact, 2)
+            projected_next_statement = max(round((expected_next_card_statement or 0.0) + next_statement_delta, 2), 0.0)
+            after_salary_balance = round(before_payday_balance + monthly_income - projected_next_statement, 2)
+
+            cash_if_immediate = round(cushion_until_payday - amount, 2)
+            forces_credit_dependency = (
+                payment_method == "credit_card"
+                and action_type == "purchase"
+                and cash_if_immediate < 0
+            )
+
+            risk_level = classify_risk_level(before_payday_balance, forces_credit_dependency=forces_credit_dependency)
+            recommendation = build_recommendation(
+                risk_level,
+                payment_method,
+                action_type,
+                intent["timing"],
+                is_essential=intent.get("is_essential", False)
+            )
+
+            lines.extend([
+                "",
+                "🛍️ Affordability check",
+                f"- Purchase/Payment amount: {format_eur(amount)}",
+                f"- Category: {intent['category']}",
+                f"- Timing: {intent['timing'].replace('_', ' ')}",
+                f"- Payment method: {payment_method.replace('_', ' ')}",
+                f"- Available balance estimate: {format_eur(available_balance_estimate)}",
+                f"- Before-salary view: {format_eur(before_payday_balance)} estimated cushion",
+                f"- After-salary view: {format_eur(after_salary_balance)} estimated post-salary position",
+                f"- Remaining buffer after this action: {format_eur(before_payday_balance)}",
+                f"- Risk level: {risk_level}",
+                f"- Impact on next card statement: {format_eur(projected_next_statement)} projected",
+                f"- Recommendation: {recommendation}"
+            ])
+            if before_payday_balance < 500:
+                lines.append("- Comfort view: This may be mathematically possible, but not comfortable.")
+            if payment_method == "credit_card" and action_type == "purchase":
+                lines.append("- Card note: this does not reduce cash immediately, but increases the next statement.")
+            elif action_type == "card_bill_payment":
+                lines.append("- Card note: paying Advanzia reduces cash now and can reduce upcoming card liability.")
+        else:
+            lines.extend([
+                "",
+                "🛍️ Affordability check",
+                "- I can estimate this, but I need the amount (for example: can I afford €500?)."
+            ])
+
+    lines.extend([
+        "",
+        "To save salary/rent/EMI/goals/plans, use Finance Setup and confirm with ✅ Save."
+    ])
+    return "\n".join(lines)
