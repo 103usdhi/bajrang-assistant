@@ -966,6 +966,113 @@ def get_latest_explicit_salary_day_from_conversation(current_message):
     return None
 
 
+def get_finance_trend_lines():
+    try:
+        rows = get_finance_transactions("amount,transaction_type,category,created_at,description") or []
+        if not rows:
+            return []
+
+        now = datetime.now(get_timezone())
+        current_month = (now.year, now.month)
+        prev_month_date = (now.replace(day=1) - timedelta(days=1))
+        previous_month = (prev_month_date.year, prev_month_date.month)
+
+        current_totals = {"income": 0.0, "expense": 0.0, "vehicle": 0.0, "card": 0.0}
+        previous_totals = {"income": 0.0, "expense": 0.0, "vehicle": 0.0, "card": 0.0}
+
+        for row in rows:
+            created_at = str(row.get("created_at") or "")
+            if not created_at:
+                continue
+            try:
+                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(get_timezone())
+            except Exception:
+                continue
+            bucket = (dt.year, dt.month)
+            if bucket not in {current_month, previous_month}:
+                continue
+
+            target = current_totals if bucket == current_month else previous_totals
+            amount = float(row.get("amount") or 0)
+            tx_type = str(row.get("transaction_type") or "").lower()
+            category = str(row.get("category") or "").lower()
+            desc = str(row.get("description") or "").lower()
+
+            if tx_type == "income":
+                target["income"] += amount
+            elif tx_type == "expense":
+                target["expense"] += amount
+
+            if any(token in f"{category} {desc}" for token in ("car", "vehicle", "insurance", "fuel", "tax", "registration", "transport")):
+                target["vehicle"] += amount
+            if any(token in f"{category} {desc}" for token in ("credit card", "advanzia", "card bill", "statement")):
+                target["card"] += amount
+
+        if (current_totals["income"] + current_totals["expense"] + previous_totals["income"] + previous_totals["expense"]) == 0:
+            return []
+
+        lines = []
+        card_delta = round(current_totals["card"] - previous_totals["card"], 2)
+        if abs(card_delta) >= 1:
+            direction = "increased" if card_delta > 0 else "decreased"
+            lines.append(f"- Credit-card spending {direction} by EUR {abs(card_delta):,.2f}".replace(",", " "))
+
+        current_surplus = current_totals["income"] - current_totals["expense"]
+        previous_surplus = previous_totals["income"] - previous_totals["expense"]
+        surplus_delta = round(current_surplus - previous_surplus, 2)
+        if abs(surplus_delta) >= 1:
+            direction = "improved" if surplus_delta > 0 else "decreased"
+            lines.append(f"- Monthly surplus {direction} by EUR {abs(surplus_delta):,.2f}".replace(",", " "))
+
+        vehicle_delta = round(current_totals["vehicle"] - previous_totals["vehicle"], 2)
+        if abs(vehicle_delta) >= 1:
+            direction = "increased" if vehicle_delta > 0 else "decreased"
+            lines.append(f"- Vehicle-related expenses {direction} by EUR {abs(vehicle_delta):,.2f}".replace(",", " "))
+
+        return lines[:3]
+    except Exception as e:
+        log_system_error("get_finance_trend_lines", e)
+        return []
+
+
+def get_repeated_value_suggestion():
+    try:
+        recent = get_recent_memories()
+        if not recent:
+            return None
+
+        pattern = re.compile(r"advanzia.*?(\d[\d.,]*)", re.IGNORECASE)
+        consecutive = 0
+        last_amount = None
+        for row in recent:
+            message = str(row.get("user_message") or "")
+            if not is_finance_advisory_request(message):
+                continue
+            match = pattern.search(message)
+            if not match:
+                break
+            amount = parse_finance_amount(match.group(1))
+            if amount is None:
+                break
+            if last_amount is None:
+                last_amount = amount
+                consecutive = 1
+            elif abs(last_amount - amount) < 0.01:
+                consecutive += 1
+            else:
+                break
+
+            if consecutive >= 3:
+                return (
+                    f"You have mentioned an Advanzia statement around {format_eur(last_amount)} "
+                    "for three consecutive analyses. Would you like me to update your finance baseline?"
+                )
+        return None
+    except Exception as e:
+        log_system_error("get_repeated_value_suggestion", e)
+        return None
+
+
 def get_finance_advisory_baseline(current_message):
     profile = get_financial_profile_row()
     commitments = fetch_finance_rows(
@@ -981,6 +1088,8 @@ def get_finance_advisory_baseline(current_message):
     recurring_income = 0.0
     credit_card_liability = 0.0
     expected_next_card_statement = 0.0
+    pressure_items = []
+    timeline_events = []
 
     for row in commitments:
         if str(row.get("status") or "active").lower() != "active":
@@ -988,18 +1097,43 @@ def get_finance_advisory_baseline(current_message):
         amount = float(row.get("amount") or 0)
         ctype = str(row.get("commitment_type") or "").lower()
         name = str(row.get("name") or "").lower()
+        display_name = str(row.get("name") or "Commitment")
         is_income = "income" in ctype
         if is_income:
             recurring_income += amount
         else:
             fixed_expenses += amount
+            pressure_items.append({"label": display_name, "amount": amount})
+            due_day = row.get("due_day")
+            if due_day:
+                timeline_events.append({
+                    "day": int(due_day),
+                    "title": f"{display_name} due",
+                    "amount": amount
+                })
         if any(token in name for token in ("credit card", "card bill", "advanzia")) or "credit" in ctype:
             credit_card_liability += amount
 
     if credit_card_liability:
         expected_next_card_statement = credit_card_liability
+    if monthly_rent:
+        pressure_items.append({"label": "Rent", "amount": monthly_rent})
     explicit_salary_day = get_latest_explicit_salary_day_from_conversation(current_message)
     salary_payday_day = explicit_salary_day if explicit_salary_day is not None else 15
+    timeline_events.append({
+        "day": salary_payday_day,
+        "title": "Salary expected",
+        "amount": monthly_salary
+    })
+    if expected_next_card_statement > 0:
+        timeline_events.append({
+            "day": 5,
+            "title": "Credit-card statement generated",
+            "amount": expected_next_card_statement
+        })
+
+    trend_lines = get_finance_trend_lines()
+    repeated_value_suggestion = get_repeated_value_suggestion()
 
     return {
         "monthly_income": round(monthly_salary + recurring_income, 2),
@@ -1007,7 +1141,11 @@ def get_finance_advisory_baseline(current_message):
         "salary_window": (12, 15),
         "salary_payday_day": salary_payday_day,
         "credit_card_liability": round(credit_card_liability, 2),
-        "expected_next_card_statement": round(expected_next_card_statement, 2)
+        "expected_next_card_statement": round(expected_next_card_statement, 2),
+        "pressure_items": pressure_items,
+        "timeline_events": timeline_events,
+        "trend_lines": trend_lines,
+        "repeated_value_suggestion": repeated_value_suggestion
     }
 
 

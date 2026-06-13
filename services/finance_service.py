@@ -231,7 +231,124 @@ def parse_future_plan_text(text, parse_finance_amount, parse_plan_month):
     }
 
 
-def is_critical_finance_capture_request(text):
+def _legacy_is_critical_finance_capture_request(text):
+    lowered = str(text or "").lower()
+    has_number = bool(re.search(r"\b\d[\d.,]*\b", lowered))
+    if not has_number:
+        return False
+
+    critical_words = (
+        "salary", "rent", "emi", "loan", "recurring bill",
+        "savings goal", "financial goal", "future plan"
+    )
+    if any(word in lowered for word in critical_words):
+        return True
+
+    month_names = (
+        "january", "february", "march", "april", "may", "june",
+        "july", "august", "september", "october", "november", "december"
+    )
+    future_plan_markers = (
+        "invest", "investment", "buy", "purchase", "refund",
+        "expected income", "expected payment", "next month",
+        "planned", "goal", "save for"
+    )
+    finance_context_markers = (
+        "finance", "money", "income", "payment", "salary", "rent",
+        "emi", "loan", "bill", "invest", "buy", "purchase", "refund", "goal", "save"
+    )
+
+    has_month_signal = "next month" in lowered or any(month in lowered for month in month_names)
+    has_future_signal = any(marker in lowered for marker in future_plan_markers) or has_month_signal
+    has_finance_context = any(marker in lowered for marker in finance_context_markers) or "€" in str(text or "") or "eur" in lowered
+    return has_future_signal and has_finance_context
+
+    default_forces_credit_dependency = cushion_until_payday < 0 and expected_next_card_statement > 0
+    health_rating, surplus_after_liabilities = get_financial_health_rating(
+        monthly_left,
+        expected_next_card_statement,
+        forces_credit_dependency=default_forces_credit_dependency
+    )
+
+    if is_financial_understanding_prompt(text):
+        pressure_points = collect_pressure_points(expense_items, baseline_pressure_items)
+
+        positives = []
+        if monthly_left > 0:
+            positives.append("Income exceeds recurring obligations.")
+        if monthly_left >= 0:
+            positives.append("No monthly deficit detected.")
+        if cushion_until_payday > 0:
+            positives.append("There is still an estimated buffer before payday.")
+        if expected_next_card_statement <= max(monthly_income * 0.35, 1):
+            positives.append("Credit-card liability is currently manageable versus income.")
+
+        risks = []
+        if expected_next_card_statement > max(monthly_income * 0.35, 500):
+            risks.append("Persistent high credit-card usage may tighten next month's flexibility.")
+        if cushion_until_payday < 500:
+            risks.append("Emergency buffer before payday is small.")
+        if default_forces_credit_dependency:
+            risks.append("You may depend on card/debt timing before salary arrives.")
+        if any(name == "Loan commitments" for name, _ in pressure_points) and any(name == "Credit-card liabilities" for name, _ in pressure_points):
+            risks.append("Multiple debt commitments reduce flexibility.")
+
+        opportunities = []
+        if any(name == "High recurring subscriptions" for name, _ in pressure_points):
+            opportunities.append("Review recurring subscriptions and trim low-value ones.")
+        if any(name == "Vehicle-related expenses" for name, _ in pressure_points):
+            opportunities.append("Re-check vehicle costs (insurance/tax/registration) for possible reductions.")
+        if expected_next_card_statement > 0:
+            opportunities.append("Gradually reduce new card spending to lower next statement pressure.")
+        if surplus_after_liabilities < 500:
+            opportunities.append("Build an emergency buffer in small monthly steps until at least EUR 500.")
+        if any(name == "Loan commitments" for name, _ in pressure_points):
+            opportunities.append("If possible, evaluate partial early repayment on highest-cost debt.")
+
+        lines.extend([
+            "",
+            "\U0001F9E0 Financial Understanding",
+            f"- Overall situation: {health_rating.lower()}",
+            f"- Financial health rating: {health_rating}",
+            f"- Surplus after known liabilities: {format_eur(surplus_after_liabilities)}"
+        ])
+
+        lines.append("")
+        lines.append("Key Pressure Points")
+        if pressure_points:
+            for name, amount in pressure_points[:4]:
+                lines.append(f"- {name}: {format_eur(amount)}")
+        else:
+            lines.append("- No dominant pressure point detected from current data.")
+
+        lines.append("")
+        lines.append("Positive Observations")
+        if positives:
+            for item in positives[:4]:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- No strong positive signal yet from this snapshot.")
+
+        lines.append("")
+        lines.append("Risks and Warnings")
+        if risks:
+            for item in risks[:4]:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- No immediate structural warning detected.")
+
+        lines.append("")
+        lines.append("Improvement Opportunities")
+        if opportunities:
+            for item in opportunities[:4]:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- Keep monitoring and maintain current spending discipline.")
+
+        lines.append("")
+        lines.append(f"Comfort View: {build_comfort_view(health_rating)}")
+        lines.append(f"- Suggested action style: {build_recommendation_from_health(health_rating)}")
+
     lowered = str(text or "").lower()
     has_number = bool(re.search(r"\b\d[\d.,]*\b", lowered))
     if not has_number:
@@ -262,6 +379,39 @@ def is_critical_finance_capture_request(text):
     has_future_signal = any(marker in lowered for marker in future_plan_markers) or has_month_signal
     has_finance_context = any(marker in lowered for marker in finance_context_markers) or "€" in str(text or "") or "eur" in lowered
 
+    return has_future_signal and has_finance_context
+
+
+def is_critical_finance_capture_request(text):
+    lowered = str(text or "").lower()
+    has_number = bool(re.search(r"\b\d[\d.,]*\b", lowered))
+    if not has_number:
+        return False
+
+    critical_words = (
+        "salary", "rent", "emi", "loan", "recurring bill",
+        "savings goal", "financial goal", "future plan"
+    )
+    if any(word in lowered for word in critical_words):
+        return True
+
+    month_names = (
+        "january", "february", "march", "april", "may", "june",
+        "july", "august", "september", "october", "november", "december"
+    )
+    future_plan_markers = (
+        "invest", "investment", "buy", "purchase", "refund",
+        "expected income", "expected payment", "next month",
+        "planned", "goal", "save for"
+    )
+    finance_context_markers = (
+        "finance", "money", "income", "payment", "salary", "rent",
+        "emi", "loan", "bill", "invest", "buy", "purchase", "refund", "goal", "save"
+    )
+
+    has_month_signal = "next month" in lowered or any(month in lowered for month in month_names)
+    has_future_signal = any(marker in lowered for marker in future_plan_markers) or has_month_signal
+    has_finance_context = any(marker in lowered for marker in finance_context_markers) or "€" in str(text or "") or "eur" in lowered
     return has_future_signal and has_finance_context
 
 
@@ -1035,6 +1185,8 @@ def is_finance_advisory_request(text):
 
     advisory_phrases = (
         "what's your understanding", "whats your understanding", "understanding of this",
+        "summarize this", "analyze my finances", "what do you think",
+        "give me your assessment", "how healthy is my financial situation",
         "can i afford", "can i spend", "if i pay", "how much will i have left", "how much do i have left",
         "cash flow", "until payday", "before payday", "next salary", "payday",
         "credit card statement", "future liability", "projected balance", "surplus", "deficit",
@@ -1132,6 +1284,105 @@ def classify_risk_level(value, forces_credit_dependency=False):
     return "safe"
 
 
+def is_financial_understanding_prompt(text):
+    lowered = str(text or "").lower()
+    phrases = (
+        "what's your understanding", "whats your understanding", "understanding of this",
+        "summarize this", "analyze my finances", "what do you think",
+        "give me your assessment", "how healthy is my financial situation"
+    )
+    return any(phrase in lowered for phrase in phrases)
+
+
+def infer_pressure_bucket(label):
+    lowered = str(label or "").lower()
+    if "rent" in lowered or "housing" in lowered:
+        return "Housing costs"
+    if any(token in lowered for token in ("car", "fuel", "registration", "plate", "insurance", "tax")):
+        return "Vehicle-related expenses"
+    if any(token in lowered for token in ("loan", "emi", "klarna", "debt")):
+        return "Loan commitments"
+    if any(token in lowered for token in ("credit card", "advanzia", "card bill", "statement")):
+        return "Credit-card liabilities"
+    if any(token in lowered for token in ("subscription", "netflix", "mobile", "internet")):
+        return "High recurring subscriptions"
+    return "Recurring commitments"
+
+
+def collect_pressure_points(expense_items, baseline_pressure_items):
+    totals = {}
+    for item in expense_items or []:
+        bucket = infer_pressure_bucket(item.get("label"))
+        totals[bucket] = totals.get(bucket, 0.0) + float(item.get("amount") or 0)
+    for item in baseline_pressure_items or []:
+        bucket = infer_pressure_bucket(item.get("label"))
+        totals[bucket] = totals.get(bucket, 0.0) + float(item.get("amount") or 0)
+    ranked = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+    return ranked[:4]
+
+
+def get_financial_health_rating(monthly_left, expected_next_card_statement, forces_credit_dependency=False):
+    surplus_after_liabilities = round(float(monthly_left or 0) - float(expected_next_card_statement or 0), 2)
+    if monthly_left < 0 or surplus_after_liabilities < 0 or forces_credit_dependency:
+        return "Critical", surplus_after_liabilities
+    if surplus_after_liabilities > 1000:
+        return "Comfortable", surplus_after_liabilities
+    if surplus_after_liabilities >= 500:
+        return "Stable", surplus_after_liabilities
+    if surplus_after_liabilities >= 200:
+        return "Tight", surplus_after_liabilities
+    return "Stressed", surplus_after_liabilities
+
+
+def build_comfort_view(health_rating):
+    if health_rating == "Comfortable":
+        return "You appear financially comfortable with a healthy margin."
+    if health_rating == "Stable":
+        return "You appear financially stable with a reasonable buffer."
+    if health_rating == "Tight":
+        return "This is mathematically manageable, but not financially comfortable."
+    if health_rating == "Stressed":
+        return "Your obligations are manageable for now, but unexpected expenses could create pressure."
+    return "Your current pattern suggests financial stress and dependency risk if spending continues."
+
+
+def build_recommendation_from_health(health_rating):
+    if health_rating == "Comfortable":
+        return "buy now"
+    if health_rating == "Stable":
+        return "buy now"
+    if health_rating == "Tight":
+        return "wait until salary"
+    if health_rating == "Stressed":
+        return "pay partially"
+    return "avoid this month"
+
+
+def format_timeline_events(timeline_events, now, format_eur):
+    if not timeline_events:
+        return []
+
+    month_label = now.strftime("%b")
+    normalized = []
+    for row in timeline_events:
+        day = int(row.get("day") or 0)
+        if day <= 0:
+            continue
+        normalized.append({
+            "day": day,
+            "title": str(row.get("title") or "Cash event"),
+            "amount": float(row.get("amount") or 0)
+        })
+
+    normalized.sort(key=lambda x: x["day"])
+    lines = ["📅 Upcoming Timeline", ""]
+    for event in normalized[:6]:
+        lines.append(f"{event['day']} {month_label}:")
+        lines.append(f"- {event['title']} ({format_eur(event['amount'])})")
+        lines.append("")
+    return lines
+
+
 def build_recommendation(risk_level, payment_method, action_type, timing, is_essential=False):
     if risk_level == "safe":
         if payment_method == "credit_card" and action_type == "purchase":
@@ -1152,11 +1403,6 @@ def build_recommendation(risk_level, payment_method, action_type, timing, is_ess
     if action_type == "card_bill_payment":
         return "pay partially"
     return "avoid this month (do not buy or pay full amount now)"
-    if risk_level == "safe":
-        return "Looks affordable with current numbers and a reasonable buffer."
-    if risk_level == "tight":
-        return "Possible, but buffer is tight. Prefer delaying or reducing the amount."
-    return "High pressure on cash flow. Better to wait until salary or reduce spending."
 
 
 def _next_date_with_day(today, target_day):
@@ -1190,6 +1436,10 @@ def build_finance_advisory_reply(text, timezone, parse_finance_amount, format_eu
     baseline_payday_day = int((baseline or {}).get("salary_payday_day") or 15)
     baseline_card_liability = float((baseline or {}).get("credit_card_liability") or 0)
     baseline_next_card = float((baseline or {}).get("expected_next_card_statement") or baseline_card_liability)
+    baseline_pressure_items = (baseline or {}).get("pressure_items") or []
+    baseline_timeline_events = (baseline or {}).get("timeline_events") or []
+    baseline_trend_lines = (baseline or {}).get("trend_lines") or []
+    repeated_value_suggestion = (baseline or {}).get("repeated_value_suggestion")
 
     monthly_income = round(sum(item["amount"] for item in income_items), 2) if income_items else round(baseline_income, 2)
     monthly_expenses = round(sum(item["amount"] for item in expense_items), 2) if expense_items else round(baseline_fixed_expenses, 2)
@@ -1293,6 +1543,110 @@ def build_finance_advisory_reply(text, timezone, parse_finance_amount, format_eu
             f"- Current statement amount: {format_eur(current_card_liability)}",
             f"- Expected next statement: {format_eur(expected_next_card_statement)}",
             "- Note: current spending typically appears on a future statement cycle."
+        ])
+
+    default_forces_credit_dependency = cushion_until_payday < 0 and expected_next_card_statement > 0
+    health_rating, surplus_after_liabilities = get_financial_health_rating(
+        monthly_left,
+        expected_next_card_statement,
+        forces_credit_dependency=default_forces_credit_dependency
+    )
+
+    if is_financial_understanding_prompt(text):
+        pressure_points = collect_pressure_points(expense_items, baseline_pressure_items)
+
+        positives = []
+        if monthly_left > 0:
+            positives.append("Income exceeds recurring obligations.")
+        if monthly_left >= 0:
+            positives.append("No monthly deficit detected.")
+        if cushion_until_payday > 0:
+            positives.append("There is still an estimated buffer before payday.")
+        if expected_next_card_statement <= max(monthly_income * 0.35, 1):
+            positives.append("Credit-card liability is currently manageable versus income.")
+
+        risks = []
+        if expected_next_card_statement > max(monthly_income * 0.35, 500):
+            risks.append("Persistent high credit-card usage may tighten next month's flexibility.")
+        if cushion_until_payday < 500:
+            risks.append("Emergency buffer before payday is small.")
+        if default_forces_credit_dependency:
+            risks.append("You may depend on card/debt timing before salary arrives.")
+        if any(name == "Loan commitments" for name, _ in pressure_points) and any(name == "Credit-card liabilities" for name, _ in pressure_points):
+            risks.append("Multiple debt commitments reduce flexibility.")
+
+        opportunities = []
+        if any(name == "High recurring subscriptions" for name, _ in pressure_points):
+            opportunities.append("Review recurring subscriptions and trim low-value ones.")
+        if any(name == "Vehicle-related expenses" for name, _ in pressure_points):
+            opportunities.append("Re-check vehicle costs (insurance/tax/registration) for possible reductions.")
+        if expected_next_card_statement > 0:
+            opportunities.append("Gradually reduce new card spending to lower next statement pressure.")
+        if surplus_after_liabilities < 500:
+            opportunities.append("Build an emergency buffer in small monthly steps until at least EUR 500.")
+        if any(name == "Loan commitments" for name, _ in pressure_points):
+            opportunities.append("If possible, evaluate partial early repayment on highest-cost debt.")
+
+        lines.extend([
+            "",
+            "\U0001F9E0 Financial Understanding",
+            f"- Overall situation: {health_rating.lower()}",
+            f"- Financial health rating: {health_rating}",
+            f"- Surplus after known liabilities: {format_eur(surplus_after_liabilities)}"
+        ])
+
+        lines.append("")
+        lines.append("Key Pressure Points")
+        if pressure_points:
+            for name, amount in pressure_points[:4]:
+                lines.append(f"- {name}: {format_eur(amount)}")
+        else:
+            lines.append("- No dominant pressure point detected from current data.")
+
+        lines.append("")
+        lines.append("Positive Observations")
+        if positives:
+            for item in positives[:4]:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- No strong positive signal yet from this snapshot.")
+
+        lines.append("")
+        lines.append("Risks and Warnings")
+        if risks:
+            for item in risks[:4]:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- No immediate structural warning detected.")
+
+        lines.append("")
+        lines.append("Improvement Opportunities")
+        if opportunities:
+            for item in opportunities[:4]:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- Keep monitoring and maintain current spending discipline.")
+
+        lines.append("")
+        lines.append(f"Comfort View: {build_comfort_view(health_rating)}")
+        lines.append(f"- Suggested action style: {build_recommendation_from_health(health_rating)}")
+
+    timeline_lines = format_timeline_events(baseline_timeline_events, now, format_eur)
+    if timeline_lines:
+        lines.extend([""] + timeline_lines)
+
+    if baseline_trend_lines:
+        lines.append("")
+        lines.append("📈 Trend Detection")
+        for item in baseline_trend_lines[:3]:
+            lines.append(item)
+
+    if repeated_value_suggestion:
+        lines.extend([
+            "",
+            "💡 Action Suggestion",
+            f"- {repeated_value_suggestion}",
+            "- I will not save anything unless you explicitly confirm."
         ])
 
     lowered = str(text or "").lower()
